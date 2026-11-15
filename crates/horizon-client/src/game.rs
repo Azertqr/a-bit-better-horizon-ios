@@ -6364,26 +6364,7 @@ impl Game<'_> {
         }
         if show_hud {
             self.draw_touch_controls(&mut batch);
-            if let Ok(raven) = crate::raven_bs::global_raven().lock() {
-                if raven.cfg.hud_enabled {
-                    batch.text(
-                        &self.gui.atlas,
-                        "Raven bS+ [Rust iOS]",
-                        8.0,
-                        8.0,
-                        rgba(155, 89, 182, 255),
-                        true,
-                    );
-                    batch.text(
-                        &self.gui.atlas,
-                        "Reach [4.2] | NoFall | FastPlace | NoDelay | ESP",
-                        8.0,
-                        20.0,
-                        rgba(46, 204, 113, 255),
-                        true,
-                    );
-                }
-            }
+            crate::raven_bs::draw_hud_and_clickgui(&mut batch, &self.gui.atlas);
         }
         // The chat screen draws the focused chat itself; F1 hides the rest.
         if self.screen == Screen::Chat {
