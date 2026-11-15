@@ -5649,6 +5649,26 @@ impl Game<'_> {
         // picks: the attribute carries creative's and a server's modifiers.
         self.entity_reach = self.interaction_range("minecraft:entity_interaction_range", 3.0, 5.0);
         self.block_reach = self.interaction_range("minecraft:block_interaction_range", 4.5, 5.0);
+        if let Ok(raven) = crate::raven_bs::global_raven().lock() {
+            if raven.cfg.reach_enabled {
+                self.entity_reach = self.entity_reach.max(raven.cfg.reach_max as f32);
+                self.block_reach = self.block_reach.max(raven.cfg.reach_max as f32 + 1.0);
+            }
+            if raven.cfg.fast_place_enabled {
+                self.use_delay = self.use_delay.min(u32::from(raven.cfg.fast_place_delay));
+            }
+            if raven.cfg.delay_remover_enabled {
+                self.destroy_delay = 0;
+            }
+            if let Some(p) = self.player.as_mut() {
+                if raven.cfg.nofall_enabled {
+                    p.fall_distance = 0.0;
+                }
+                if raven.cfg.fly_enabled {
+                    p.flying = true;
+                }
+            }
+        }
         self.tick_debug_keys()?;
         self.tick_debug_charts();
         self.tick_tutorial();
@@ -6344,6 +6364,26 @@ impl Game<'_> {
         }
         if show_hud {
             self.draw_touch_controls(&mut batch);
+            if let Ok(raven) = crate::raven_bs::global_raven().lock() {
+                if raven.cfg.hud_enabled {
+                    batch.text(
+                        &self.gui.atlas,
+                        "Raven bS+ [Rust iOS]",
+                        8.0,
+                        8.0,
+                        rgba(155, 89, 182, 255),
+                        true,
+                    );
+                    batch.text(
+                        &self.gui.atlas,
+                        "Reach [4.2] | NoFall | FastPlace | NoDelay | ESP",
+                        8.0,
+                        20.0,
+                        rgba(46, 204, 113, 255),
+                        true,
+                    );
+                }
+            }
         }
         // The chat screen draws the focused chat itself; F1 hides the rest.
         if self.screen == Screen::Chat {
