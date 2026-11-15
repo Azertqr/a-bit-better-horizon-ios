@@ -480,6 +480,17 @@ impl Game<'_> {
             touch.location.x as f32 / batch.scale,
             touch.location.y as f32 / batch.scale,
         );
+        if crate::raven_bs::handle_touch_event(
+            at.0,
+            at.1,
+            batch.width,
+            batch.height,
+            matches!(touch.phase, TouchPhase::Started),
+            matches!(touch.phase, TouchPhase::Moved),
+            matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled),
+        ) {
+            return Ok(());
+        }
         // Every start, lift and cancel, but a drag's moves only once a second: the log wants the shape of a
         // gesture and the state the look gate reads, not a hundred lines a second.
         if touch.phase != TouchPhase::Moved || log_due("touch", std::time::Duration::from_secs(1)) {
