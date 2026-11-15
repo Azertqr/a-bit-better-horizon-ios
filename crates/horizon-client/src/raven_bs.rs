@@ -6,7 +6,6 @@
 #![allow(dead_code, clippy::too_many_arguments, clippy::type_complexity)]
 
 use std::collections::{HashMap, VecDeque};
-use std::f32::consts::PI;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -73,7 +72,7 @@ impl Vec3 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct BlockPos {
     pub x: i32,
     pub y: i32,
@@ -97,7 +96,11 @@ impl BlockPos {
 
     #[inline]
     pub fn center(self) -> Vec3 {
-        Vec3::new(self.x as f64 + 0.5, self.y as f64 + 0.5, self.z as f64 + 0.5)
+        Vec3::new(
+            self.x as f64 + 0.5,
+            self.y as f64 + 0.5,
+            self.z as f64 + 0.5,
+        )
     }
 
     #[inline]
@@ -260,10 +263,28 @@ pub struct DrawCommand {
 
 #[derive(Clone, Debug)]
 pub enum DrawKind {
-    Rect { x: f32, y: f32, w: f32, h: f32, radius: f32 },
-    Text { x: f32, y: f32, text: String, scale: f32 },
-    Line3D { start: Vec3, end: Vec3, width: f32 },
-    Box3D { aabb: Aabb, outline_only: bool },
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+    },
+    Text {
+        x: f32,
+        y: f32,
+        text: String,
+        scale: f32,
+    },
+    Line3D {
+        start: Vec3,
+        end: Vec3,
+        width: f32,
+    },
+    Box3D {
+        aabb: Aabb,
+        outline_only: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -465,7 +486,6 @@ impl RotationUtils {
         let dyaw = Self::wrap_degrees(target.0 - current.0);
         let dpitch = target.1 - current.1;
         let factor = (speed / 100.0).clamp(0.05, 1.0);
-        // Apply GCD mouse sensitivity quantization (~0.15 deg step)
         let gcd = 0.15_f32;
         let step_yaw = ((dyaw * factor) / gcd).round() * gcd;
         let step_pitch = ((dpitch * factor) / gcd).round() * gcd;
@@ -957,7 +977,6 @@ pub fn global_raven() -> &'static Mutex<RavenEngine> {
 impl RavenEngine {
     #[inline]
     fn next_rand_f32(&mut self) -> f32 {
-        // Xorshift64* fast deterministic PRNG for CPS & jitter randomization
         let mut x = self.prng_state;
         x ^= x >> 12;
         x ^= x << 25;
@@ -977,10 +996,8 @@ impl RavenEngine {
             self.air_ticks = self.air_ticks.saturating_add(1);
         }
 
-        // 1. Update BackTrack entity position ring-buffer
         self.update_backtrack(ctx);
 
-        // 2. Run Combat Suite
         self.run_anti_fireball(ctx);
         self.run_killaura(ctx);
         self.run_aim_assist(ctx);
@@ -989,7 +1006,6 @@ impl RavenEngine {
         self.run_tp_aura(ctx);
         self.run_wtap_and_jump_reset(ctx);
 
-        // 3. Run Movement Suite
         self.run_timer(ctx);
         self.run_sprint(ctx);
         self.run_fly(ctx);
@@ -998,7 +1014,6 @@ impl RavenEngine {
         self.run_step_and_dolphin(ctx);
         self.run_instant_stop(ctx);
 
-        // 4. Run Player & Inventory Suite
         self.run_delay_remover(ctx);
         self.run_fast_place(ctx);
         self.run_nofall(ctx);
@@ -1010,11 +1025,9 @@ impl RavenEngine {
         self.run_block_in(ctx);
         self.run_freecam(ctx);
 
-        // 5. Run World Suite (Scaffold & BedAura)
         self.run_bed_aura(ctx);
         self.run_scaffold(ctx);
 
-        // 6. Run Minigames & Render State Updates
         self.run_minigame_helpers(ctx);
         self.run_render_state(ctx);
         self.render_overlays(ctx);
@@ -1028,7 +1041,6 @@ impl RavenEngine {
         if e.id == ctx.player.entity_id || !e.is_player || e.health <= 0.0 {
             return false;
         }
-        // AntiBot filter (ticks existed, valid ping, ground check)
         if self.cfg.antibot_enabled && (e.ticks_existed < 20 || e.ping < 0) {
             return false;
         }
@@ -1059,7 +1071,6 @@ impl RavenEngine {
     fn effective_target_pos(&self, e: &EntitySnapshot, eye: Vec3) -> Vec3 {
         if self.cfg.backtrack_enabled {
             if let Some(history) = self.backtrack_history.get(&e.id) {
-                // Choose historical position closest to player's attack reach
                 if let Some((_, best_pos)) = history
                     .iter()
                     .min_by(|a, b| a.1.dist_sq(eye).partial_cmp(&b.1.dist_sq(eye)).unwrap())
@@ -1103,19 +1114,15 @@ impl RavenEngine {
             return;
         }
 
-        // Sort by lowest health then distance
         candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
 
         let idx = match self.cfg.killaura_mode {
             KillAuraMode::Single => 0,
-            KillAuraMode::Switch | KillAuraMode::Multi => {
-                self.switch_index % candidates.len()
-            }
+            KillAuraMode::Switch | KillAuraMode::Multi => self.switch_index % candidates.len(),
         };
         let (target_id, aim_point, _) = candidates[idx];
         self.current_target_id = Some(target_id);
 
-        // Smooth server-side rotation with GCD fix
         let desired_rot = RotationUtils::rotations_to_vec(eye, aim_point);
         let (nyaw, npitch) = RotationUtils::smooth_step(
             (ctx.player.server_yaw, ctx.player.server_pitch),
@@ -1125,7 +1132,6 @@ impl RavenEngine {
         ctx.player.server_yaw = nyaw;
         ctx.player.server_pitch = npitch;
 
-        // Randomized CPS delay
         let t = self.next_rand_f32();
         let cps = self.cfg.killaura_min_cps
             + t * (self.cfg.killaura_max_cps - self.cfg.killaura_min_cps);
@@ -1136,13 +1142,12 @@ impl RavenEngine {
             self.switch_index = self.switch_index.wrapping_add(1);
             self.lmb_clicks.push_back(self.last_attack);
 
-            // HitSelect check: prefer attacking during hurt_time recovery frame or falling
             ctx.player.swinging = true;
 
             if self.cfg.killaura_mode == KillAuraMode::Multi {
                 for (cid, cpos, _) in &candidates {
                     ctx.send_packet(OutgoingPacket {
-                        packet_id: 0x02, // C02 UseEntity (Attack)
+                        packet_id: 0x02,
                         timestamp: Instant::now(),
                         pos: Some(*cpos),
                         rot: Some((nyaw, npitch)),
@@ -1161,7 +1166,6 @@ impl RavenEngine {
                 });
             }
 
-            // KeepSprint / Reduce velocity preservation
             if self.cfg.keep_sprint_enabled {
                 ctx.player.sprinting = true;
             } else if self.cfg.reduce_enabled {
@@ -1169,12 +1173,11 @@ impl RavenEngine {
                 ctx.player.vel.z *= self.cfg.reduce_multiplier;
             }
 
-            // Autoblock state machine
             match self.cfg.killaura_autoblock {
                 AutoblockMode::Vanilla | AutoblockMode::Interact => {
                     ctx.player.blocking = true;
                     ctx.send_packet(OutgoingPacket {
-                        packet_id: 0x08, // C08 BlockPlace (Sword block)
+                        packet_id: 0x08,
                         timestamp: Instant::now(),
                         pos: None,
                         rot: None,
@@ -1201,7 +1204,7 @@ impl RavenEngine {
         }
 
         let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        if let Some(target) = ctx
+        let target_aim = ctx
             .entities
             .iter()
             .filter(|e| self.is_valid_combat_target(ctx, e))
@@ -1211,8 +1214,9 @@ impl RavenEngine {
                 d <= self.cfg.aim_assist_distance && fov <= self.cfg.aim_assist_fov
             })
             .min_by(|a, b| eye.dist_sq(a.pos).partial_cmp(&eye.dist_sq(b.pos)).unwrap())
-        {
-            let aim_pt = Vec3::new(target.pos.x, target.pos.y + target.height * 0.8, target.pos.z);
+            .map(|target| Vec3::new(target.pos.x, target.pos.y + target.height * 0.8, target.pos.z));
+
+        if let Some(aim_pt) = target_aim {
             let desired = RotationUtils::rotations_to_vec(eye, aim_pt);
             let (nyaw, npitch) = RotationUtils::smooth_step(
                 (ctx.player.yaw, ctx.player.pitch),
@@ -1245,13 +1249,13 @@ impl RavenEngine {
                 ctx.player.pitch = (ctx.player.pitch + jy).clamp(-90.0, 90.0);
             }
 
-            // Raycast with extended Reach & HitBox expansion
             if let Some(hit_id) = self.raycast_combat_entity(ctx) {
+                let rot = (ctx.player.yaw, ctx.player.pitch);
                 ctx.send_packet(OutgoingPacket {
                     packet_id: 0x02,
                     timestamp: Instant::now(),
                     pos: None,
-                    rot: Some((ctx.player.yaw, ctx.player.pitch)),
+                    rot: Some(rot),
                     target_entity: Some(hit_id),
                     raw_bytes: vec![0x02, (hit_id & 0xFF) as u8],
                 });
@@ -1294,19 +1298,21 @@ impl RavenEngine {
             return;
         }
         let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        if let Some(fb) = ctx
+        let found_fb = ctx
             .entities
             .iter()
             .find(|e| e.is_fireball && eye.dist(e.pos) <= 4.8)
-        {
-            let rot = RotationUtils::rotations_to_vec(eye, fb.pos);
+            .map(|fb| (fb.id, fb.pos));
+
+        if let Some((fb_id, fb_pos)) = found_fb {
+            let rot = RotationUtils::rotations_to_vec(eye, fb_pos);
             ctx.send_packet(OutgoingPacket {
                 packet_id: 0x02,
                 timestamp: Instant::now(),
-                pos: Some(fb.pos),
+                pos: Some(fb_pos),
                 rot: Some(rot),
-                target_entity: Some(fb.id),
-                raw_bytes: vec![0x02, (fb.id & 0xFF) as u8],
+                target_entity: Some(fb_id),
+                raw_bytes: vec![0x02, (fb_id & 0xFF) as u8],
             });
         }
     }
@@ -1323,19 +1329,20 @@ impl RavenEngine {
         }
 
         let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        if let Some(target) = ctx
+        let target_info = ctx
             .entities
             .iter()
             .filter(|e| self.is_valid_combat_target(ctx, e) && eye.dist(e.pos) <= 10.0)
             .min_by(|a, b| eye.dist_sq(a.pos).partial_cmp(&eye.dist_sq(b.pos)).unwrap())
-        {
-            // Ballistic lead prediction for fishing bobber velocity
-            let dist = eye.dist(target.pos);
+            .map(|t| (t.pos, t.vel, t.height));
+
+        if let Some((tpos, tvel, theight)) = target_info {
+            let dist = eye.dist(tpos);
             let flight_ticks = (dist / 1.4).clamp(1.0, 15.0);
             let predicted = Vec3::new(
-                target.pos.x + target.vel.x * flight_ticks,
-                target.pos.y + target.height * 0.7 + (dist * 0.04),
-                target.pos.z + target.vel.z * flight_ticks,
+                tpos.x + tvel.x * flight_ticks,
+                tpos.y + theight * 0.7 + (dist * 0.04),
+                tpos.z + tvel.z * flight_ticks,
             );
             let (ryaw, rpitch) = RotationUtils::rotations_to_vec(eye, predicted);
             ctx.player.server_yaw = ryaw;
@@ -1348,16 +1355,20 @@ impl RavenEngine {
             return;
         }
         let origin = ctx.player.pos;
-        if let Some(target) = ctx
+        let found_target = ctx
             .entities
             .iter()
-            .filter(|e| self.is_valid_combat_target(ctx, e) && origin.dist(e.pos) <= self.cfg.tp_aura_range)
+            .filter(|e| {
+                self.is_valid_combat_target(ctx, e) && origin.dist(e.pos) <= self.cfg.tp_aura_range
+            })
             .min_by(|a, b| origin.dist_sq(a.pos).partial_cmp(&origin.dist_sq(b.pos)).unwrap())
-        {
-            let steps = (origin.dist(target.pos) / 3.5).ceil() as usize;
+            .map(|t| (t.id, t.pos));
+
+        if let Some((target_id, target_pos)) = found_target {
+            let steps = (origin.dist(target_pos) / 3.5).ceil().max(1.0) as usize;
             for i in 1..=steps {
                 let frac = i as f64 / steps as f64;
-                let step_pos = origin.add(target.pos.sub(origin).scale(frac));
+                let step_pos = origin.add(target_pos.sub(origin).scale(frac));
                 ctx.send_packet(OutgoingPacket {
                     packet_id: 0x04, // C04 PlayerPosition
                     timestamp: Instant::now(),
@@ -1370,34 +1381,32 @@ impl RavenEngine {
             ctx.send_packet(OutgoingPacket {
                 packet_id: 0x02,
                 timestamp: Instant::now(),
-                pos: Some(target.pos),
+                pos: Some(target_pos),
                 rot: None,
-                target_entity: Some(target.id),
+                target_entity: Some(target_id),
                 raw_bytes: vec![0x02],
             });
         }
     }
 
     fn run_wtap_and_jump_reset(&mut self, ctx: &mut WorldContext) {
-        // WTap: reset sprint state on fresh attack tick for maximum knockback
         if self.cfg.wtap_enabled && ctx.player.swinging && ctx.player.sprinting {
+            let eid = ctx.player.entity_id;
             ctx.send_packet(OutgoingPacket {
-                packet_id: 0x0B, // C0B EntityAction Stop/Start Sprint
+                packet_id: 0x0B,
                 timestamp: Instant::now(),
                 pos: None,
                 rot: None,
-                target_entity: Some(ctx.player.entity_id),
+                target_entity: Some(eid),
                 raw_bytes: vec![0x0B, 0x05, 0x04],
             });
         }
 
-        // JumpReset: jump automatically on damage tick (hurt_time == 9) to reduce knockback legitimely
         if self.cfg.jump_reset_enabled && ctx.player.hurt_time == 9 && ctx.player.on_ground {
             ctx.player.vel.y = 0.42;
             ctx.player.on_ground = false;
         }
 
-        // Velocity modifier on damage tick
         if self.cfg.velocity_enabled && ctx.player.hurt_time == 9 {
             let roll = (self.next_rand_f32() * 100.0) as u8;
             if roll <= self.cfg.velocity_chance {
@@ -1544,10 +1553,11 @@ impl RavenEngine {
 
     pub fn trigger_vclip(&mut self, ctx: &mut WorldContext) {
         ctx.player.pos.y += self.cfg.vclip_distance;
+        let new_pos = ctx.player.pos;
         ctx.send_packet(OutgoingPacket {
             packet_id: 0x04,
             timestamp: Instant::now(),
-            pos: Some(ctx.player.pos),
+            pos: Some(new_pos),
             rot: None,
             target_entity: None,
             raw_bytes: vec![0x04],
@@ -1560,7 +1570,6 @@ impl RavenEngine {
 
     fn run_delay_remover(&mut self, ctx: &mut WorldContext) {
         if self.cfg.delay_remover_enabled {
-            // Removes 1.8 left-click miss penalty
             ctx.player.swinging = false;
         }
     }
@@ -1573,10 +1582,11 @@ impl RavenEngine {
 
     fn run_nofall(&mut self, ctx: &mut WorldContext) {
         if self.cfg.nofall_enabled && ctx.player.fall_distance > 2.75 {
+            let ppos = ctx.player.pos;
             ctx.send_packet(OutgoingPacket {
-                packet_id: 0x03, // C03 Player ground=true spoof
+                packet_id: 0x03,
                 timestamp: Instant::now(),
-                pos: Some(ctx.player.pos),
+                pos: Some(ppos),
                 rot: None,
                 target_entity: None,
                 raw_bytes: vec![0x03, 0x01],
@@ -1618,17 +1628,18 @@ impl RavenEngine {
             ctx.player.pos.z,
         ));
         if ctx.is_solid(below) {
-            if let Some(slot) = ctx.player.inventory[0..9]
-                .iter()
-                .position(|s| s.as_ref().map_or(false, |i| i.category == ItemCategory::WaterBucket))
-            {
+            if let Some(slot) = ctx.player.inventory[0..9].iter().position(|s| {
+                s.as_ref()
+                    .map_or(false, |i| i.category == ItemCategory::WaterBucket)
+            }) {
                 ctx.player.hotbar_slot = slot;
                 ctx.player.server_pitch = 90.0;
+                let yaw = ctx.player.yaw;
                 ctx.send_packet(OutgoingPacket {
-                    packet_id: 0x08, // Use bucket downwards
+                    packet_id: 0x08,
                     timestamp: Instant::now(),
                     pos: Some(below.center()),
-                    rot: Some((ctx.player.yaw, 90.0)),
+                    rot: Some((yaw, 90.0)),
                     target_entity: None,
                     raw_bytes: vec![0x08],
                 });
@@ -1641,7 +1652,6 @@ impl RavenEngine {
         if !self.cfg.auto_tool_enabled || !ctx.player.attack_pressed {
             return;
         }
-        // Select highest damage sword if attacking an entity, or highest mining speed tool
         if self.current_target_id.is_some() {
             if let Some((best_slot, _)) = ctx.player.inventory[0..9]
                 .iter()
@@ -1663,7 +1673,6 @@ impl RavenEngine {
     }
 
     fn run_chest_stealer_and_inv_manager(&mut self, ctx: &mut WorldContext) {
-        // ChestStealer
         if self.cfg.chest_stealer_enabled
             && !ctx.player.open_chest_slots.is_empty()
             && ctx.tick_counter % self.cfg.chest_stealer_delay_ticks.max(1) == 0
@@ -1682,7 +1691,6 @@ impl RavenEngine {
             }
         }
 
-        // InventoryManager: drop trash items and sort sword to slot 0, blocks to slot 1
         if self.cfg.inv_manager_enabled && ctx.tick_counter % 4 == 0 {
             for slot in &mut ctx.player.inventory {
                 if slot
@@ -1777,15 +1785,13 @@ impl RavenEngine {
             return;
         }
 
-        // 1. Auto-select block slot in hotbar
-        if let Some(block_slot) = ctx.player.inventory[0..9]
-            .iter()
-            .position(|s| s.as_ref().map_or(false, |i| i.category == ItemCategory::Block && i.count > 0))
-        {
+        if let Some(block_slot) = ctx.player.inventory[0..9].iter().position(|s| {
+            s.as_ref()
+                .map_or(false, |i| i.category == ItemCategory::Block && i.count > 0)
+        }) {
             ctx.player.hotbar_slot = block_slot;
         }
 
-        // 2. Apply Scaffold Sprint mode
         match self.cfg.scaffold_sprint {
             ScaffoldSprintMode::Disabled => ctx.player.sprinting = false,
             ScaffoldSprintMode::Vanilla | ScaffoldSprintMode::Legit => ctx.player.sprinting = true,
@@ -1804,12 +1810,10 @@ impl RavenEngine {
             }
         }
 
-        // 3. Tower upwards if holding jump while stationary
         if self.cfg.scaffold_tower && ctx.player.jump_pressed && !MoveUtil::is_moving(&ctx.player) {
             ctx.player.vel.y = 0.42;
         }
 
-        // 4. Telly / Normal Schedule check
         let can_place = match self.cfg.scaffold_schedule {
             ScaffoldScheduleMode::Normal => true,
             ScaffoldScheduleMode::SimpleTelly => self.air_ticks == 0 || self.air_ticks >= 2,
@@ -1828,7 +1832,6 @@ impl RavenEngine {
             return;
         }
 
-        // 5. Search adjacent solid support block
         let faces = [
             BlockFace::Down,
             BlockFace::North,
@@ -1842,11 +1845,14 @@ impl RavenEngine {
                 let place_face = face.opposite();
                 let hit_vec = neighbor.center();
 
-                // 6. Compute Scaffold Rotation mode
                 let (ryaw, rpitch) = match self.cfg.scaffold_rotation {
                     ScaffoldRotationMode::Strict | ScaffoldRotationMode::Precise => {
                         RotationUtils::rotations_to_vec(
-                            Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z),
+                            Vec3::new(
+                                ctx.player.pos.x,
+                                ctx.player.pos.y + 1.62,
+                                ctx.player.pos.z,
+                            ),
                             hit_vec,
                         )
                     }
@@ -1885,7 +1891,7 @@ impl RavenEngine {
                         ctx.player.server_yaw = rot.0;
                         ctx.player.server_pitch = rot.1;
                         ctx.send_packet(OutgoingPacket {
-                            packet_id: 0x07, // C07 PlayerDigging Start/Stop Destroy Bed
+                            packet_id: 0x07,
                             timestamp: Instant::now(),
                             pos: Some(check.center()),
                             rot: Some(rot),
@@ -1916,11 +1922,11 @@ impl RavenEngine {
     }
 
     fn run_render_state(&mut self, ctx: &mut WorldContext) {
-        ctx.player.gamma = if self.cfg.fullbright_enabled { 100.0 } else { 1.0 };
-
-        if self.cfg.no_hurt_cam_enabled {
-            // Zero out camera shake hurt ticks while preserving internal combat timing
-        }
+        ctx.player.gamma = if self.cfg.fullbright_enabled {
+            100.0
+        } else {
+            1.0
+        };
 
         if self.cfg.freelook_enabled {
             if self.freelook_anchor.is_none() {
@@ -1935,7 +1941,6 @@ impl RavenEngine {
     fn render_overlays(&mut self, ctx: &mut WorldContext) {
         ctx.draw_buffer.clear();
 
-        // 1. HUD Watermark & Active Module ArrayList
         if self.cfg.hud_enabled {
             ctx.draw_buffer.push(DrawCommand {
                 kind: DrawKind::Text {
@@ -1948,7 +1953,6 @@ impl RavenEngine {
             });
         }
 
-        // 2. Keystrokes + CPS Counter
         if self.cfg.keystrokes_enabled {
             let now = Instant::now();
             self.lmb_clicks
@@ -1956,7 +1960,11 @@ impl RavenEngine {
             self.rmb_clicks
                 .retain(|t| now.duration_since(*t) <= Duration::from_secs(1));
 
-            let cps_text = format!("LMB: {} CPS | RMB: {} CPS", self.lmb_clicks.len(), self.rmb_clicks.len());
+            let cps_text = format!(
+                "LMB: {} CPS | RMB: {} CPS",
+                self.lmb_clicks.len(),
+                self.rmb_clicks.len()
+            );
             ctx.draw_buffer.push(DrawCommand {
                 kind: DrawKind::Rect {
                     x: 10.0,
@@ -1978,7 +1986,6 @@ impl RavenEngine {
             });
         }
 
-        // 3. PlayerESP, MobESP, ItemESP & Tracers
         let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
         for e in &ctx.entities {
             if e.id == ctx.player.entity_id {
@@ -2015,7 +2022,6 @@ impl RavenEngine {
             }
         }
 
-        // 4. TargetHUD
         if self.cfg.target_hud_enabled {
             if let Some(tid) = self.current_target_id {
                 if let Some(target) = ctx.entities.iter().find(|e| e.id == tid) {
@@ -2024,6 +2030,7 @@ impl RavenEngine {
                     } else {
                         &target.name
                     };
+                    let hud_label = format!("{} ({:.1} HP)", display_name, target.health);
                     ctx.draw_buffer.push(DrawCommand {
                         kind: DrawKind::Rect {
                             x: 420.0,
@@ -2038,7 +2045,7 @@ impl RavenEngine {
                         kind: DrawKind::Text {
                             x: 428.0,
                             y: 328.0,
-                            text: format!("{} ({:.1} HP)", display_name, target.health),
+                            text: hud_label,
                             scale: 1.0,
                         },
                         color_rgba: 0x2ECC71FF,
@@ -2047,7 +2054,6 @@ impl RavenEngine {
             }
         }
 
-        // 5. Ballistic Trajectories (Bow / EnderPearl / Potions)
         if self.cfg.trajectories_enabled {
             self.render_projectile_trajectory(ctx);
         }
