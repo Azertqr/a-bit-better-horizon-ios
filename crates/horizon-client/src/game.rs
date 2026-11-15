@@ -5651,8 +5651,8 @@ impl Game<'_> {
         self.block_reach = self.interaction_range("minecraft:block_interaction_range", 4.5, 5.0);
         if let Ok(raven) = crate::raven_bs::global_raven().lock() {
             if raven.cfg.reach_enabled {
-                self.entity_reach = self.entity_reach.max(raven.cfg.reach_max as f32);
-                self.block_reach = self.block_reach.max(raven.cfg.reach_max as f32 + 1.0);
+                self.entity_reach = self.entity_reach.max(raven.cfg.reach_max);
+                self.block_reach = self.block_reach.max(raven.cfg.reach_max + 1.0);
             }
             if raven.cfg.fast_place_enabled {
                 self.use_delay = self.use_delay.min(u32::from(raven.cfg.fast_place_delay));
