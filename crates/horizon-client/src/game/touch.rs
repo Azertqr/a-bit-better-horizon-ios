@@ -1223,7 +1223,11 @@ impl Game<'_> {
         let cursor_mode = self.settings.touch.pointer == touch::PointerMode::Cursor;
         match phase {
             TouchPhase::Started => {
+                let mut stale = None;
                 if let Some(finger) = self.touch.menu.as_mut() {
+                    if finger.id == id {
+                        return;
+                    }
                     // A second finger over a cursor-mode gesture scrolls, as a touchpad's two fingers
                     // would, while the first keeps the pointer where it is.
                     if cursor_mode
@@ -1243,8 +1247,20 @@ impl Game<'_> {
                             at.0,
                             at.1
                         );
+                        return;
                     }
-                    return;
+                    if finger.second.is_some() {
+                        // A scroll owns its two fingers; a third one waits for it to end.
+                        return;
+                    }
+                    stale = Some(finger.id);
+                }
+                if let Some(stale) = stale {
+                    // The finger that is down never lifted: UIKit can swallow an end (a palm resting on
+                    // the glass, a touch cancelled as a screen changes), and until now every later tap
+                    // was ignored, so no button answered. Let that gesture go and take this finger.
+                    log::info!("touch menu: finger {stale} never lifted; {id} takes its place");
+                    self.touch_release_menu(event_loop);
                 }
                 // In cursor mode the finger drags the pointer a touchpad's mouse would, and a tap acts
                 // under it, so the gesture starts wherever the pointer was left.
