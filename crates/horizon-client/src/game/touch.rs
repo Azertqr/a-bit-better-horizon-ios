@@ -956,10 +956,24 @@ impl Game<'_> {
             // Directly, as a tap does: a touch screen never captures the pointer, so a `MouseInput`
             // event would be taken for a first click that only grabs and would act on nothing.
             touch::CustomKey::Mouse(button) => {
-                if state == ElementState::Pressed {
+                let pressed = state == ElementState::Pressed;
+                if self.touch_menu_pad_shown() {
+                    // Over a screen the click is the screen's, under the pointer, as a tap's is.
+                    // Grabbing first would warp the pointer to the window's centre and leave the
+                    // screen without the click, so a second finger's drag lost what it carried.
+                    if pressed {
+                        let at =
+                            clamp_point(self.touch.cursor.unwrap_or(self.cursor), self.touch_batch());
+                        self.touch_pointer(event_loop, at);
+                        self.touch.cursor = Some(self.cursor);
+                    }
+                    self.touch_mouse(event_loop, button, pressed);
+                    return Ok(());
+                }
+                if pressed {
                     self.touch_grab();
                 }
-                self.play_mouse(button, state == ElementState::Pressed)
+                self.play_mouse(button, pressed)
             }
         }
     }
@@ -1223,7 +1237,11 @@ impl Game<'_> {
         let cursor_mode = self.settings.touch.pointer == touch::PointerMode::Cursor;
         match phase {
             TouchPhase::Started => {
+                let mut stale = None;
                 if let Some(finger) = self.touch.menu.as_mut() {
+                    if finger.id == id {
+                        return;
+                    }
                     // A second finger over a cursor-mode gesture scrolls, as a touchpad's two fingers
                     // would, while the first keeps the pointer where it is.
                     if cursor_mode
@@ -1243,8 +1261,20 @@ impl Game<'_> {
                             at.0,
                             at.1
                         );
+                        return;
                     }
-                    return;
+                    if finger.second.is_some() {
+                        // A scroll owns its two fingers; a third one waits for it to end.
+                        return;
+                    }
+                    stale = Some(finger.id);
+                }
+                if let Some(stale) = stale {
+                    // The finger that is down never lifted: UIKit can swallow an end (a palm resting on
+                    // the glass, a touch cancelled as a screen changes), and until now every later tap
+                    // was ignored, so no button answered. Let that gesture go and take this finger.
+                    log::info!("touch menu: finger {stale} never lifted; {id} takes its place");
+                    self.touch_release_menu(event_loop);
                 }
                 // In cursor mode the finger drags the pointer a touchpad's mouse would, and a tap acts
                 // under it, so the gesture starts wherever the pointer was left.
@@ -1543,11 +1573,15 @@ impl Game<'_> {
     }
 
     fn touch_button(&mut self, event_loop: &dyn EventLoopCtl, pressed: bool) {
+        self.touch_mouse(event_loop, MouseButton::Left, pressed);
+    }
+
+    fn touch_mouse(&mut self, event_loop: &dyn EventLoopCtl, button: MouseButton, pressed: bool) {
         let Some(id) = self.window.as_ref().map(|w| w.id()) else {
             return;
         };
         log::info!(
-            "touch menu click {}",
+            "touch menu click {button:?} {}",
             if pressed { "down" } else { "up" }
         );
         let state = if pressed {
@@ -1561,7 +1595,7 @@ impl Game<'_> {
             WindowEvent::MouseInput {
                 device_id: DeviceId::dummy(),
                 state,
-                button: MouseButton::Left,
+                button,
             },
         super::input_trace::InputOrigin::User,
         );
