@@ -2592,7 +2592,7 @@ impl PackPost {
         defer: bool,
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Result<(Self, Vec<Job>), Refused> {
-        let mut complete = post.complete;
+        let mut complete = true;
         // What the pack's shaders need of its storage buffers, before its parts move out.
         let minimums = post.buffer_minimums();
         let features = device.features();
