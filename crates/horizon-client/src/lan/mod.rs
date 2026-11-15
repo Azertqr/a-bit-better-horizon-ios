@@ -1066,6 +1066,19 @@ pub fn available_port() -> u16 {
         .map_or(25565, |a| a.port())
 }
 
+/// The IPv4 address this machine reaches the network by, the one a guest's
+/// Direct Connection would use. No packet is sent (a UDP connect only picks
+/// the route), and only a local-network address counts: with no Wi-Fi a
+/// phone's route leads to the carrier, whose address no guest can reach.
+pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect(("8.8.8.8", 80)).ok()?;
+    match socket.local_addr().ok()? {
+        SocketAddr::V4(address) if address.ip().is_private() => Some(*address.ip()),
+        _ => None,
+    }
+}
+
 /// Same-machine harnesses opt in; real LAN runs keep the normal network interfaces.
 pub(super) fn test_loopback() -> bool {
     std::env::var_os("HORIZON_TEST_LOOPBACK").is_some_and(|v| v == "1")

@@ -1654,6 +1654,13 @@ impl Game<'_> {
                     (false, _) => Text::translate("menu.multiplayerOptions.publish.stopped", &[]),
                 };
                 self.send_publish_message(message);
+                // The address a guest types into Direct Connection: iOS
+                // cannot hear the multicast announcement.
+                if let (true, Some(port)) = (w.lan, self.lan_port())
+                    && let Some(ip) = horizon_client::lan::local_ipv4()
+                {
+                    self.send_publish_message(Text::literal(format!("LAN: {ip}:{port}")));
+                }
             }
             return;
         }

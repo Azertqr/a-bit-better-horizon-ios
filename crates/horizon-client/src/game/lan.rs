@@ -1423,6 +1423,11 @@ impl Game<'_> {
             "menu.multiplayerOptions.publish.started.lan",
             &[Text::literal(port.to_string())],
         ));
+        // The address a guest types into Direct Connection. iOS cannot hear
+        // the multicast announcement, so the list alone may stay empty there.
+        if let Some(ip) = lan::local_ipv4() {
+            self.system_message(Text::literal(format!("LAN: {ip}:{port}")));
+        }
         Ok(())
     }
     /// Start the network side and the play-state hub: for the LAN (with the

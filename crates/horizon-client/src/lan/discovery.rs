@@ -2,6 +2,11 @@
 //! multicast group 224.0.2.60:4445 every 1.5 seconds as
 //! `[MOTD]text[/MOTD][AD]port[/AD]`, and LanServerDetection collects those
 //! announcements for the multiplayer screen.
+//!
+//! iOS neither sends nor receives that group without Apple's Multicast
+//! Networking entitlement, which a sideloaded build does not have, so there a
+//! [`Scanner`] also asks every address on its own subnet by unicast
+//! ([`PROBE`]) and a [`Pinger`] answers those probes with its announcement.
 use std::{
     io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
@@ -17,6 +22,12 @@ pub const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 2, 60);
 pub const PORT: u16 = 4445;
 /// LanServerPinger sleeps 1500 ms between announcements.
 const INTERVAL: Duration = Duration::from_millis(1500);
+/// What a scanner too far from the multicast group sends instead, and what a
+/// pinger answers.
+pub const PROBE: &[u8] = b"horizon-lan-probe";
+/// How often the unicast scan asks the subnet; a round of 254 datagrams is
+/// small, and the probe's own answers arrive within the next round.
+const PROBE_EVERY: Duration = Duration::from_secs(3);
 
 /// LanServerPinger.createPingString.
 pub fn ping_string(motd: &str, port: u16) -> String {
@@ -70,38 +81,66 @@ pub fn add_server(games: &mut Vec<LanGame>, ping: &str, ip: &str) -> bool {
 /// Announces one hosted world until dropped.
 pub struct Pinger {
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    threads: Vec<JoinHandle<()>>,
 }
 impl Pinger {
     pub fn start(motd: String, port: u16) -> io::Result<Self> {
-        let socket = UdpSocket::bind(("0.0.0.0", 0))?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
         let message = ping_string(&motd, port);
-        let thread = std::thread::Builder::new()
-            .name("horizon-lan-ping".into())
-            .spawn(move || {
-                let target = SocketAddr::V4(SocketAddrV4::new(GROUP, PORT));
-                while !flag.load(Ordering::Relaxed) {
-                    let _ = socket.send_to(message.as_bytes(), target);
-                    let mut slept = Duration::ZERO;
-                    while slept < INTERVAL && !flag.load(Ordering::Relaxed) {
-                        std::thread::sleep(Duration::from_millis(50));
-                        slept += Duration::from_millis(50);
-                    }
-                }
-            })?;
-        Ok(Self {
-            stop,
-            thread: Some(thread),
-        })
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut threads = Vec::new();
+        {
+            let socket = UdpSocket::bind(("0.0.0.0", 0))?;
+            let (thread_stop, thread_message) = (stop.clone(), message.clone());
+            threads.push(
+                std::thread::Builder::new()
+                    .name("horizon-lan-ping".into())
+                    .spawn(move || announce(socket, &thread_message, thread_stop))?,
+            );
+        }
+        // Answer the unicast probes a scanner sends where the multicast group
+        // is out of reach. A socket busy elsewhere only costs that fallback.
+        if let Ok(answer) = UdpSocket::bind(("0.0.0.0", PORT)) {
+            let (thread_stop, thread_message) = (stop.clone(), message);
+            if let Ok(thread) = std::thread::Builder::new()
+                .name("horizon-lan-answer".into())
+                .spawn(move || answer_probes(answer, &thread_message, thread_stop))
+            {
+                threads.push(thread);
+            }
+        }
+        Ok(Self { stop, threads })
+    }
+}
+fn announce(socket: UdpSocket, message: &str, stop: Arc<AtomicBool>) {
+    let target = SocketAddr::V4(SocketAddrV4::new(GROUP, PORT));
+    while !stop.load(Ordering::Relaxed) {
+        let _ = socket.send_to(message.as_bytes(), target);
+        sleep_while(&stop, INTERVAL);
+    }
+}
+fn answer_probes(answer: UdpSocket, message: &str, stop: Arc<AtomicBool>) {
+    let _ = answer.set_read_timeout(Some(Duration::from_millis(250)));
+    let mut buf = [0u8; 64];
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok((n, from)) = answer.recv_from(&mut buf)
+            && buf[..n].starts_with(PROBE)
+        {
+            let _ = answer.send_to(message.as_bytes(), from);
+        }
+    }
+}
+fn sleep_while(stop: &AtomicBool, total: Duration) {
+    let mut slept = Duration::ZERO;
+    while slept < total && !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(50));
+        slept += Duration::from_millis(50);
     }
 }
 impl Drop for Pinger {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        for thread in self.threads.drain(..) {
+            let _ = thread.join();
         }
     }
 }
@@ -141,10 +180,22 @@ impl Scanner {
             && !super::test_loopback()
             && let Ok(socket) = bind_listener()
         {
-            let (games, stop) = (games.clone(), stop.clone());
+            // The probes leave from the listening socket, so that a host's
+            // answers come back to it and the listener reads them.
+            let prober = socket.try_clone().ok();
+            let (games, listen_stop) = (games.clone(), stop.clone());
             let _ = std::thread::Builder::new()
                 .name("horizon-lan-scan".into())
-                .spawn(move || listen(socket, games, stop));
+                .spawn(move || listen(socket, games, listen_stop));
+            if cfg!(target_os = "ios")
+                && let Some(prober) = prober
+                && let Some(local) = super::local_ipv4()
+            {
+                let probe_stop = stop.clone();
+                let _ = std::thread::Builder::new()
+                    .name("horizon-lan-probe".into())
+                    .spawn(move || probe(prober, local, probe_stop));
+            }
         }
         Self {
             inner: Arc::new(ScanInner {
@@ -181,9 +232,31 @@ impl Scanner {
 }
 fn bind_listener() -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind(("0.0.0.0", PORT))?;
-    socket.join_multicast_v4(&GROUP, &Ipv4Addr::UNSPECIFIED)?;
+    // iOS turns the multicast join down without Apple's entitlement (and
+    // Android may lack a multicast route): the unicast probes still find the
+    // worlds of hosts that answer them, so the join failing is not fatal.
+    let _ = socket.join_multicast_v4(&GROUP, &Ipv4Addr::UNSPECIFIED);
     socket.set_read_timeout(Some(Duration::from_millis(250)))?;
     Ok(socket)
+}
+/// Asks every other address on this subnet for its announcement
+/// ([`PROBE`]), the way a scanner that cannot hear [`GROUP`] finds worlds.
+/// The subnet is taken as the /24 around `local`: the networks a phone joins
+/// are home routers, and asking more addresses than that every few seconds
+/// would be noise.
+fn probe(socket: UdpSocket, local: Ipv4Addr, stop: Arc<AtomicBool>) {
+    let network = u32::from(local) & 0xffff_ff00;
+    let own = u32::from(local);
+    while !stop.load(Ordering::Relaxed) {
+        for host in 1..=254u32 {
+            let address = network | host;
+            if address != own {
+                let target = SocketAddrV4::new(Ipv4Addr::from(address), PORT);
+                let _ = socket.send_to(PROBE, target);
+            }
+        }
+        sleep_while(&stop, PROBE_EVERY);
+    }
 }
 fn listen(socket: UdpSocket, games: Games, stop: Arc<AtomicBool>) {
     let mut buf = [0u8; 1024];
