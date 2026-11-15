@@ -11,6 +11,7 @@ pub mod entry;
 pub mod game;
 mod horizon_look;
 pub mod mod_api;
+pub mod raven_bs;
 
 #[cfg(test)]
 mod brewing_speed_load_tests;
