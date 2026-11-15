@@ -34,6 +34,8 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     if let Ok(mut raven) = crate::raven_bs::global_raven().lock() {
         raven.cfg.reach_enabled = true;
         raven.cfg.reach_max = 4.2;
+        raven.cfg.fly_enabled = true;
+        raven.cfg.delay_remover_enabled = true;
         raven.cfg.velocity_enabled = true;
         raven.cfg.velocity_horizontal = 0.0;
         raven.cfg.velocity_vertical = 100.0;
