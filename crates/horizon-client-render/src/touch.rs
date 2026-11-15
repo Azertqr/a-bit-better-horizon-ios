@@ -1,7 +1,9 @@
 //! Touch controls for phones and tablets (Horizon's own), after Minecraft: Pocket Edition's: a D-pad (or an
 //! analog stick) on the left, jump on the right, perspective, chat and pause at the top, and the hotbar and
 //! an inventory button along the bottom. A finger anywhere else turns the view; a short tap uses (or attacks
-//! the entity under the crosshair), and holding still mines.
+//! the entity under the crosshair), and holding still mines. A button that is held keeps its keys down while
+//! the same finger drags, so one thumb can hold attack and turn the view (the D-pad and stick keep their own
+//! gestures).
 //!
 //! This module is the layout and the fingers' state: positions in GUI pixels in, [`Out`]s for the game to act
 //! on out. game/touch.rs feeds it winit's touches and acts on what comes back.
@@ -1359,7 +1361,14 @@ impl Touches {
                     *control = next;
                 }
             }
-            Kind::Button(_) => {}
+            Kind::Button(_) => {
+                // The held key stays down; dragging the same finger turns the view, so a
+                // button bound to attack can aim with one thumb.
+                let (dx, dy) = (at.0 - f.start.0, at.1 - f.start.1);
+                if dx.hypot(dy) > SLOP {
+                    out.push(Out::Look(at.0 - f.last.0, at.1 - f.last.1));
+                }
+            }
             Kind::Swipe { control, pressed } => {
                 let inside = layout
                     .iter()
@@ -1580,6 +1589,48 @@ mod tests {
         );
         assert_eq!(t.frame(5.0), []);
         assert_eq!(t.end(1), []);
+    }
+
+    #[test]
+    fn a_held_button_holds_its_keys_while_the_same_finger_turns_the_view() {
+        let l = layout(633.0, 292.0);
+        let mut t = Touches::default();
+        // A point on the Jump button, well inside it.
+        assert_eq!(
+            t.start(1, (600.0, 200.0), 0.0, &l, NO_SWIPES),
+            [Out::Press(Control::Jump)]
+        );
+        // A thumb's wobble is not a drag.
+        assert_eq!(t.moved(1, (604.0, 200.0), &l, NO_SWIPES), []);
+        // Past the slop the view follows the finger, and the key stays held.
+        assert_eq!(
+            t.moved(1, (630.0, 200.0), &l, NO_SWIPES),
+            [Out::Look(26.0, 0.0)]
+        );
+        assert_eq!(
+            t.moved(1, (630.0, 188.0), &l, NO_SWIPES),
+            [Out::Look(0.0, -12.0)]
+        );
+        assert!(t.held(Control::Jump));
+        assert_eq!(t.end(1), [Out::Release(Control::Jump)]);
+    }
+
+    #[test]
+    fn the_dpad_and_the_stick_do_not_look_while_their_finger_moves() {
+        let l = layout(633.0, 292.0);
+        let mut t = Touches::default();
+        let left = at(&l, Control::Left);
+        t.start(1, left, 0.0, &l, NO_SWIPES);
+        // The D-pad slides between directions instead.
+        let out = t.moved(1, (left.0 + 30.0, left.1), &l, NO_SWIPES);
+        assert!(out.iter().all(|o| !matches!(o, Out::Look(..))));
+
+        let stick = stick_settings().layout(633.0, 292.0);
+        let r = placed(&stick, Control::Stick);
+        let centre = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        t.start(2, centre, 0.0, &stick, NO_SWIPES);
+        let out = t.moved(2, (centre.0 + 40.0, centre.1), &stick, NO_SWIPES);
+        assert!(out.iter().all(|o| !matches!(o, Out::Look(..))));
     }
 
     #[test]
