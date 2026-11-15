@@ -906,7 +906,21 @@ fn authenticate(
         }
     };
     let ip = online.prevent_proxy.then(|| address.ip());
-    match crate::auth::has_joined(name, &digest, ip) {
+    let mut verified = crate::auth::has_joined(name, &digest, ip);
+    // A LAN world takes guests of either account service: a player signed in to Ely.by joined
+    // through Ely.by's session server, which the Mojang services answer nothing about.
+    if shared.config.elyby_guests && !matches!(verified, Ok(Some(_))) {
+        match crate::auth::elyby_has_joined(name, &digest) {
+            Ok(Some(profile)) => verified = Ok(Some(profile)),
+            Ok(None) => {}
+            Err(error) => {
+                if verified.is_ok() {
+                    verified = Err(error);
+                }
+            }
+        }
+    }
+    match verified {
         Ok(Some(profile)) => {
             log(
                 "INFO",

@@ -253,6 +253,9 @@ pub struct NetConfig {
     pub gate: Option<LoginGate>,
     /// Online mode: players are authenticated (a LAN world's when its host is signed in).
     pub online: Option<Arc<OnlineMode>>,
+    /// A LAN world also welcomes guests signed in to Ely.by: when the Mojang services don't know a
+    /// joining name, `auth::elyby_has_joined` is asked before refusing (`conn::authenticate`).
+    pub elyby_guests: bool,
     /// Behind a Velocity proxy: the secret its forwarded player information is signed with. Only an offline
     /// server (the proxy authenticates) uses it; without it a login is the plain offline one.
     pub forwarding_secret: Option<Vec<u8>>,
@@ -333,6 +336,7 @@ impl NetConfig {
             bypasses_limit: None,
             gate: None,
             online: None,
+            elyby_guests: true,
             forwarding_secret: None,
             arrivals: None,
             log: None,

@@ -1283,6 +1283,8 @@ impl Game<'_> {
             })),
             gate: Some(gate),
             online,
+            // A dedicated server keeps vanilla's check: Mojang's services only.
+            elyby_guests: false,
             forwarding_secret,
             arrivals: transfers.as_ref().map(|t| t.expected.clone()),
             log: Some(NetLog {

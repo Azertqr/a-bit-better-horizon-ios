@@ -26,12 +26,22 @@ pub enum Provider {
 /// Ely.by's session server: `POST /session/join`, the legacy Yggdrasil body (accessToken, selectedProfile,
 /// serverId), the same one `join_request` builds. `HORIZON_ELYBY_SESSION` overrides it for tests.
 pub const ELYBY_JOIN: &str = "https://authserver.ely.by/session/join";
+/// Ely.by's legacy Yggdrasil `GET /session/hasJoined`: the question a server asks about a joining
+/// player. `HORIZON_ELYBY_HAS_JOINED` overrides it for tests.
+pub const ELYBY_HAS_JOINED: &str = "https://authserver.ely.by/session/hasJoined";
 
 fn elyby_join_url() -> String {
     std::env::var("HORIZON_ELYBY_SESSION")
         .ok()
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| ELYBY_JOIN.to_owned())
+}
+
+fn elyby_has_joined_url() -> String {
+    std::env::var("HORIZON_ELYBY_HAS_JOINED")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| ELYBY_HAS_JOINED.to_owned())
 }
 
 /// A signed-in account (vanilla's User with type msa).
@@ -684,6 +694,34 @@ pub fn has_joined(
     }
     let separator = if url.contains('?') { '&' } else { '?' };
     let body = match agent().get(&format!("{url}{separator}{query}")).call() {
+        Ok(response) => response.into_string().unwrap_or_default(),
+        Err(ureq::Error::Status(status, response)) => {
+            let error =
+                JoinError::from_response(status, &response.into_string().unwrap_or_default());
+            return match error {
+                JoinError::Unavailable => Err(error),
+                _ => Ok(None),
+            };
+        }
+        Err(ureq::Error::Transport(_)) => return Err(JoinError::Unavailable),
+    };
+    Ok(parse_joined(&body))
+}
+
+/// Ely.by's answer to the same question as [`has_joined`]: whether `name` joined the server whose
+/// hash is `server_hash`, through Ely.by's session server (a third-party Yggdrasil service; the
+/// Mojang services know nothing about its players). `Ok(None)`: it didn't, or the service said no.
+pub fn elyby_has_joined(
+    name: &str,
+    server_hash: &str,
+) -> Result<Option<JoinedProfile>, JoinError> {
+    let url = format!(
+        "{}?username={}&serverId={}",
+        elyby_has_joined_url(),
+        url_encode(name),
+        url_encode(server_hash)
+    );
+    let body = match agent().get(&url).call() {
         Ok(response) => response.into_string().unwrap_or_default(),
         Err(ureq::Error::Status(status, response)) => {
             let error =
