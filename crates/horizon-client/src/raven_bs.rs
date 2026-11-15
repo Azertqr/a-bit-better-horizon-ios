@@ -1,6 +1,6 @@
 // File: crates/horizon-client/src/raven_bs.rs
-//! Complete Raven bS+ (1.3.3+1) Native Rust Engine + Touch ClickGUI + Full `Game` Wiring
-//! Every module in the ClickGUI is wired directly to Horizon's `Game` struct via `impl_raven_game!()`.
+//! Complete Raven bS+ (1.3.3+1) Native Rust Engine + Touch ClickGUI + Full `Game` & `Remote` Wiring
+//! Wired for both Singleplayer (integrated server over `self.remote`) and Multiplayer/LAN on iPadOS.
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::type_complexity)]
 
@@ -398,13 +398,13 @@ impl Default for RavenConfig {
     fn default() -> Self {
         Self {
             aim_assist_enabled: false,
-            aim_assist_speed: 45.0,
+            aim_assist_speed: 55.0,
             aim_assist_fov: 90.0,
             aim_assist_distance: 4.5,
             autoclicker_enabled: false,
             autoclicker_min_cps: 12.0,
             autoclicker_max_cps: 16.0,
-            autoclicker_jitter: 0.3,
+            autoclicker_jitter: 0.25,
             autoblock_enabled: false,
             autoblock_mode: AutoblockMode::HypixelBlink,
             velocity_enabled: false,
@@ -416,24 +416,24 @@ impl Default for RavenConfig {
             click_assist_enabled: false,
             displace_enabled: false,
             hitbox_enabled: false,
-            hitbox_expand: 0.15,
+            hitbox_expand: 0.35,
             hit_select_enabled: false,
             jump_reset_enabled: false,
             killaura_enabled: false,
             killaura_mode: KillAuraMode::Switch,
             killaura_range: 4.2,
             killaura_fov: 360.0,
-            killaura_min_cps: 11.0,
-            killaura_max_cps: 15.0,
-            killaura_rot_speed: 65.0,
+            killaura_min_cps: 12.0,
+            killaura_max_cps: 16.0,
+            killaura_rot_speed: 85.0,
             knockback_delay_enabled: false,
             knockback_delay_ms: 90,
             lag_range_enabled: false,
             lag_range_ticks: 4,
             piercing_enabled: false,
             reach_enabled: false,
-            reach_min: 3.2,
-            reach_max: 4.2,
+            reach_min: 3.5,
+            reach_max: 4.5,
             reduce_enabled: false,
             reduce_multiplier: 0.6,
             rod_aimbot_enabled: false,
@@ -458,7 +458,7 @@ impl Default for RavenConfig {
             null_move_enabled: false,
             speed_enabled: false,
             speed_mode: SpeedMode::HypixelLowHop,
-            speed_multiplier: 1.35,
+            speed_multiplier: 1.45,
             sprint_enabled: true,
             sprint_omni: false,
             stasis_enabled: false,
@@ -467,7 +467,7 @@ impl Default for RavenConfig {
             stop_motion_enabled: false,
             teleport_enabled: false,
             timer_enabled: false,
-            timer_value: 1.25,
+            timer_value: 1.35,
             vclip_enabled: false,
             vclip_distance: -3.0,
 
@@ -488,7 +488,7 @@ impl Default for RavenConfig {
             fake_lag_enabled: false,
             fake_lag_interval_ms: 120,
             fast_mine_enabled: false,
-            fast_mine_multiplier: 1.5,
+            fast_mine_multiplier: 1.6,
             fast_place_enabled: false,
             fast_place_delay: 0,
             freecam_enabled: false,
@@ -502,9 +502,9 @@ impl Default for RavenConfig {
 
             antibot_enabled: true,
             scaffold_enabled: false,
-            scaffold_sprint: ScaffoldSprintMode::HypixelJump2Sprint,
+            scaffold_sprint: ScaffoldSprintMode::Vanilla,
             scaffold_rotation: ScaffoldRotationMode::Precise,
-            scaffold_schedule: ScaffoldScheduleMode::Telly,
+            scaffold_schedule: ScaffoldScheduleMode::Normal,
             scaffold_tower: true,
             weather_clear: false,
 
@@ -569,7 +569,7 @@ impl Default for RavenConfig {
             float_btn_x: 6.0,
             float_btn_y: 42.0,
             dragging_btn: false,
-            selected_module: "FastPlace",
+            selected_module: "Scaffold",
             col_scroll: [0; 7],
         }
     }
@@ -587,6 +587,9 @@ pub struct RavenEngine {
     pub target_info: Option<(String, f32, f32, f64)>,
     pub blocks_placed_session: u32,
     pub prng: u64,
+    pub timer_was_active: bool,
+    pub fullbright_was_active: bool,
+    pub fastmine_was_active: bool,
 }
 
 impl Default for RavenEngine {
@@ -603,6 +606,9 @@ impl Default for RavenEngine {
             target_info: None,
             blocks_placed_session: 0,
             prng: 0x9E37_79B9_7F4A_7C15,
+            timer_was_active: false,
+            fullbright_was_active: false,
+            fastmine_was_active: false,
         }
     }
 }
@@ -1345,7 +1351,6 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
             }
         }
 
-        // TargetHUD card when a combat target is active
         if cfg.target_hud_enabled {
             if let Some((ref tname, hp, max_hp, dist)) = raven.target_info {
                 let tx = (batch.width * 0.5 + 24.0).min(batch.width - 130.0);
@@ -1374,7 +1379,6 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
             }
         }
 
-        // Floating `[ R ]` button
         let (bx, by) = (cfg.float_btn_x, cfg.float_btn_y);
         batch.fill(atlas, bx, by, 28.0, 22.0, rgba(20, 20, 30, 215));
         batch.fill(atlas, bx, by, 28.0, 2.0, rgba(168, 85, 247, 255));
@@ -1394,7 +1398,6 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
     batch.fill(atlas, 0.0, 0.0, sw, 22.0, rgba(18, 18, 26, 245));
     batch.fill(atlas, 0.0, 21.0, sw, 1.0, rgba(168, 85, 247, 255));
 
-    // Left `[ X ]` & Right `[ X ]`
     batch.fill(atlas, 4.0, 3.0, 26.0, 16.0, rgba(231, 76, 60, 240));
     batch.text(atlas, "X", 14.0, 7.0, rgba(255, 255, 255, 255), true);
     batch.fill(atlas, sw - 30.0, 3.0, 26.0, 16.0, rgba(231, 76, 60, 240));
@@ -1572,7 +1575,7 @@ fn draw_module_settings_rows(
             );
             batch.text(
                 atlas,
-                "Blocks Only: ON | Pitch Check: OFF",
+                "Hold Finger = Auto Place 20 blocks/s",
                 x,
                 r2 + 3.0,
                 rgba(170, 170, 190, 255),
@@ -1773,57 +1776,111 @@ fn draw_module_settings_rows(
 macro_rules! impl_raven_game {
     () => {
         impl Game<'_> {
-            /// Executes all enabled Raven bS+ Combat, Movement, Player, World & Minigame modules
-            pub(crate) fn raven_tick(&mut self) {
-                let Ok(mut raven) = $crate::raven_bs::global_raven().lock() else {
-                    return;
-                };
-
-                // 1. Reach & HitBox expansion
-                if raven.cfg.reach_enabled {
-                    self.entity_reach = self.entity_reach.max(raven.cfg.reach_max);
-                    self.block_reach = self.block_reach.max(raven.cfg.reach_max + 1.0);
+            /// Finds a solid neighbor around `target` `[x, y, z]` and returns `Hit` to place a block at `target`.
+            fn raven_find_place_hit(&self, target: [i32; 3]) -> Option<Hit> {
+                if !self
+                    .res
+                    .facts()
+                    .is_air(self.world.block(target[0], target[1], target[2]))
+                {
+                    return None;
                 }
-                if raven.cfg.hitbox_enabled {
-                    self.entity_reach = self.entity_reach.max(3.0 + raven.cfg.hitbox_expand * 2.0);
-                }
-
-                // 2. FastPlace & DelayRemover & FastMine
-                if raven.cfg.fast_place_enabled {
-                    self.use_delay = self.use_delay.min(u32::from(raven.cfg.fast_place_delay));
-                }
-                if raven.cfg.delay_remover_enabled {
-                    self.destroy_delay = 0;
-                }
-                if raven.cfg.fast_mine_enabled {
-                    self.destroy_delay = 0;
-                    if let Some(m) = self.mining.as_mut() {
-                        m.progress += m.per_tick * (raven.cfg.fast_mine_multiplier - 1.0).max(0.1);
+                let dirs: [[i32; 3]; 6] = [
+                    [0, -1, 0],
+                    [0, 1, 0],
+                    [0, 0, -1],
+                    [0, 0, 1],
+                    [-1, 0, 0],
+                    [1, 0, 0],
+                ];
+                for d in dirs {
+                    let nb = [target[0] + d[0], target[1] + d[1], target[2] + d[2]];
+                    let st = self.world.block(nb[0], nb[1], nb[2]);
+                    let facts = self.res.facts().get(st);
+                    if !self.res.facts().is_air(st) && facts.fluid == Fluid::None {
+                        let face = [-d[0], -d[1], -d[2]];
+                        let point = [
+                            f64::from(nb[0]) + 0.5 + f64::from(face[0]) * 0.5,
+                            f64::from(nb[1]) + 0.5 + f64::from(face[1]) * 0.5,
+                            f64::from(nb[2]) + 0.5 + f64::from(face[2]) * 0.5,
+                        ];
+                        return Some(Hit {
+                            pos: nb,
+                            face,
+                            point,
+                            inside: false,
+                        });
                     }
                 }
+                // Clutch 2-block search if directly under is air (diagonal / jump bridging)
+                for d1 in dirs {
+                    let mid = [target[0] + d1[0], target[1] + d1[1], target[2] + d1[2]];
+                    if !self
+                        .res
+                        .facts()
+                        .is_air(self.world.block(mid[0], mid[1], mid[2]))
+                    {
+                        continue;
+                    }
+                    for d2 in dirs {
+                        let nb = [mid[0] + d2[0], mid[1] + d2[1], mid[2] + d2[2]];
+                        let st = self.world.block(nb[0], nb[1], nb[2]);
+                        let facts = self.res.facts().get(st);
+                        if !self.res.facts().is_air(st) && facts.fluid == Fluid::None {
+                            let face = [-d2[0], -d2[1], -d2[2]];
+                            let point = [
+                                f64::from(nb[0]) + 0.5 + f64::from(face[0]) * 0.5,
+                                f64::from(nb[1]) + 0.5 + f64::from(face[1]) * 0.5,
+                                f64::from(nb[2]) + 0.5 + f64::from(face[2]) * 0.5,
+                            ];
+                            return Some(Hit {
+                                pos: nb,
+                                face,
+                                point,
+                                inside: false,
+                            });
+                        }
+                    }
+                }
+                None
+            }
 
-                // 3. Read Touch Stick + Physical Keys + Touch D-pad for Movement Input
+            /// Runs BEFORE `self.tick_remote()`: sets up Reach, Timer, Fullbright, FastMine,
+            /// queues KillAura/AutoClicker attacks, and queues Scaffold/FastPlace/BedAura interactions
+            /// so `self.remote_handle_input()` sends the real serverbound packets!
+            pub(crate) fn raven_tick(&mut self) {
+                self.forced_hit = None;
+
+                // Read D-Pad (`self.keys.held(Mapping::...)`), Touch Stick, and Keyboard
                 let stick = self.touch_move().unwrap_or([0.0, 0.0]);
                 let mut move_fwd = stick[1];
                 let mut move_left = stick[0];
-                if self.physical_keys.contains(&KeyCode::KeyW) {
+                if self.keys.held(Mapping::Forward)
+                    || self.physical_keys.contains(&KeyCode::KeyW)
+                {
                     move_fwd += 1.0;
                 }
-                if self.physical_keys.contains(&KeyCode::KeyS) {
+                if self.keys.held(Mapping::Back)
+                    || self.physical_keys.contains(&KeyCode::KeyS)
+                {
                     move_fwd -= 1.0;
                 }
-                if self.physical_keys.contains(&KeyCode::KeyA) {
+                if self.keys.held(Mapping::Left)
+                    || self.physical_keys.contains(&KeyCode::KeyA)
+                {
                     move_left += 1.0;
                 }
-                if self.physical_keys.contains(&KeyCode::KeyD) {
+                if self.keys.held(Mapping::Right)
+                    || self.physical_keys.contains(&KeyCode::KeyD)
+                {
                     move_left -= 1.0;
                 }
                 let is_moving = move_fwd.abs() > 0.05 || move_left.abs() > 0.05;
-                let jump_held = self.physical_keys.contains(&KeyCode::Space)
-                    || self.keys.held(Mapping::Jump);
-                let sneak_held = self.keys.held(Mapping::Sneak);
+                let jump_held = self.keys.held(Mapping::Jump)
+                    || self.physical_keys.contains(&KeyCode::Space);
+                let sneak_held = self.keys.held(Mapping::Sneak)
+                    || self.physical_keys.contains(&KeyCode::ShiftLeft);
 
-                // Compute movement direction angle in radians from player yaw + input
                 let mut move_yaw = self.yaw;
                 if move_fwd < -0.05 {
                     move_yaw += 180.0;
@@ -1844,602 +1901,619 @@ macro_rules! impl_raven_game {
                 let dir_x = -dir_rad.sin();
                 let dir_z = dir_rad.cos();
 
-                // Check ground & liquid under player's feet
-                let (p_pos, on_ground, in_liquid) = if let Some(p) = self.player.as_ref() {
-                    let bx = p.position.x.floor() as i32;
-                    let by = (p.position.y - 0.08).floor() as i32;
-                    let bz = p.position.z.floor() as i32;
-                    let below_state = self.world.block(bx, by, bz);
-                    let feet_state = self.world.block(bx, p.position.y.floor() as i32, bz);
-                    let solid_below = !self.res.facts().is_air(below_state)
-                        && self.res.facts().get(below_state).fluid == Fluid::None;
-                    let liq = self.res.facts().get(feet_state).fluid != Fluid::None;
-                    (
-                        [p.position.x, p.position.y, p.position.z],
-                        solid_below && p.velocity.y.abs() < 0.09,
-                        liq,
-                    )
-                } else {
-                    return;
-                };
-
-                if on_ground {
-                    raven.air_ticks = 0;
-                } else {
-                    raven.air_ticks = raven.air_ticks.saturating_add(1);
-                }
-
-                // 4. Freelook (locks camera angle while allowing body rotation)
-                if raven.cfg.freelook_enabled {
-                    if raven.freelook_anchor.is_none() {
-                        raven.freelook_anchor = Some((self.yaw, self.pitch));
-                    }
-                    self.posed_rotation = raven.freelook_anchor;
-                } else if raven.freelook_anchor.take().is_some() {
-                    self.posed_rotation = None;
-                }
-
-                // 5. Freecam
-                if raven.cfg.freecam_enabled {
-                    if raven.freecam_anchor.is_none() {
-                        raven.freecam_anchor = Some(p_pos);
-                    }
-                } else if let Some(anchor) = raven.freecam_anchor.take() {
-                    if let Some(p) = self.player.as_mut() {
-                        p.position = Vec3::new(anchor[0], anchor[1], anchor[2]);
-                        p.velocity = Vec3::ZERO;
-                    }
-                }
-
-                // 6. Player Physics & Movement Modules (NoFall, Velocity, JumpReset, Fly, Speed, BHop, LongJump, Step, Dolphin, VClip, InstantStop)
-                if let Some(p) = self.player.as_mut() {
-                    if raven.cfg.nofall_enabled || raven.cfg.fly_enabled {
-                        p.fall_distance = 0.0;
-                    }
-                    if raven.cfg.noslow_enabled {
-                        p.item_use_speed = Some(1.0);
-                        p.item_use_slows_sprint = false;
-                    }
-                    if raven.cfg.auto_jump_enabled {
-                        p.auto_jump_enabled = true;
-                    }
-
-                    // Velocity (Anti-KB) & JumpReset on damage tick
-                    if p.health.hurt.cooldown > 0 {
-                        if raven.cfg.jump_reset_enabled && on_ground && p.health.hurt.cooldown >= 8 {
-                            p.velocity.y = 0.42;
-                        }
-                        if raven.cfg.velocity_enabled && p.health.hurt.cooldown >= 8 {
-                            let h = f64::from(raven.cfg.velocity_horizontal) / 100.0;
-                            let v = f64::from(raven.cfg.velocity_vertical) / 100.0;
-                            p.velocity.x *= h;
-                            p.velocity.z *= h;
-                            p.velocity.y *= v;
-                        }
-                    }
-
-                    // VClip (one-shot vertical teleport through floor/ceiling)
-                    if raven.cfg.vclip_enabled {
-                        p.position.y += raven.cfg.vclip_distance;
-                        p.velocity.y = 0.0;
-                        p.teleported = true;
-                        raven.cfg.vclip_enabled = false;
-                    }
-
-                    // StopMotion / Stasis
-                    if raven.cfg.stop_motion_enabled || raven.cfg.stasis_enabled {
-                        p.velocity = Vec3::ZERO;
-                        raven.cfg.stop_motion_enabled = false;
-                    }
-
-                    // Fly / Freecam flight kinematics
-                    if raven.cfg.fly_enabled || raven.cfg.freecam_enabled {
-                        let spd = if raven.cfg.freecam_enabled {
-                            raven.cfg.freecam_speed * 0.45
-                        } else {
-                            raven.cfg.fly_speed * 0.42
-                        };
-                        if is_moving {
-                            p.velocity.x = dir_x * spd;
-                            p.velocity.z = dir_z * spd;
-                        } else {
-                            p.velocity.x = 0.0;
-                            p.velocity.z = 0.0;
-                        }
-                        match raven.cfg.fly_mode {
-                            $crate::raven_bs::FlyMode::Vanilla | $crate::raven_bs::FlyMode::Motion => {
-                                p.velocity.y = if jump_held {
-                                    spd * 0.75
-                                } else if sneak_held {
-                                    -spd * 0.75
-                                } else {
-                                    0.0
-                                };
-                            }
-                            $crate::raven_bs::FlyMode::Glide => {
-                                p.velocity.y = if jump_held { spd * 0.6 } else { -0.035 };
-                            }
-                            $crate::raven_bs::FlyMode::AirWalk => {
-                                p.velocity.y = 0.0;
-                            }
-                        }
+                let (p_pos, on_ground, horiz_col, in_liquid) =
+                    if let Some(p) = self.player.as_ref() {
+                        let bx = p.position.x.floor() as i32;
+                        let bz = p.position.z.floor() as i32;
+                        let feet_st = self.world.block(bx, p.position.y.floor() as i32, bz);
+                        let liq = self.res.facts().get(feet_st).fluid != Fluid::None;
+                        (
+                            [p.position.x, p.position.y, p.position.z],
+                            p.ground.on_ground,
+                            p.collision.horizontal,
+                            liq,
+                        )
                     } else {
-                        // Speed / BHop / Boost
-                        if raven.cfg.speed_enabled || raven.cfg.bhop_enabled || raven.cfg.boost_enabled {
-                            let mult = if raven.cfg.boost_enabled {
-                                raven.cfg.speed_multiplier.max(1.6)
+                        return;
+                    };
+
+                let mut trigger_left_click = false;
+                let mut trigger_right_click = false;
+
+                if let Ok(mut raven) = $crate::raven_bs::global_raven().lock() {
+                    if on_ground {
+                        raven.air_ticks = 0;
+                    } else {
+                        raven.air_ticks = raven.air_ticks.saturating_add(1);
+                    }
+
+                    // 1. Timer (scales Horizon's FixedStep clock rate)
+                    if raven.cfg.timer_enabled {
+                        self.clock
+                            .set_rate((20.0 * raven.cfg.timer_value).clamp(2.0, 100.0));
+                        raven.timer_was_active = true;
+                    } else if raven.timer_was_active {
+                        self.clock.set_rate(20.0);
+                        raven.timer_was_active = false;
+                    }
+
+                    // 2. Fullbright & AntiDebuff via client EffectInstances
+                    if raven.cfg.fullbright_enabled {
+                        raven.fullbright_was_active = true;
+                        match self
+                            .potions
+                            .effects
+                            .list
+                            .iter_mut()
+                            .find(|e| e.id == "night_vision")
+                        {
+                            Some(existing) => {
+                                existing.duration = existing.duration.max(400);
+                            }
+                            None => {
+                                let mut nv = horizon_client::effects::EffectInstance::new(
+                                    "night_vision",
+                                    400,
+                                    0,
+                                );
+                                nv.ambient = true;
+                                nv.visible = false;
+                                nv.show_icon = false;
+                                self.potions.effects.list.push(nv);
+                            }
+                        }
+                    } else if raven.fullbright_was_active {
+                        raven.fullbright_was_active = false;
+                        self.potions
+                            .effects
+                            .list
+                            .retain(|e| !(e.id == "night_vision" && e.ambient && !e.show_icon));
+                    }
+
+                    if raven.cfg.anti_debuff_enabled {
+                        self.potions.effects.list.retain(|e| {
+                            !matches!(e.id, "blindness" | "darkness" | "nausea" | "confusion")
+                        });
+                        self.screen_fx.nausea = 0.0;
+                        self.screen_fx.o_nausea = 0.0;
+                        self.sculk.darkness = 0.0;
+                    }
+
+                    // 3. FastMine via Haste III effect + zero delay
+                    if raven.cfg.fast_mine_enabled {
+                        raven.fastmine_was_active = true;
+                        self.destroy_delay = 0;
+                        match self
+                            .potions
+                            .effects
+                            .list
+                            .iter_mut()
+                            .find(|e| e.id == "haste")
+                        {
+                            Some(existing) => {
+                                existing.duration = existing.duration.max(400);
+                                existing.amplifier = existing.amplifier.max(2);
+                            }
+                            None => {
+                                let mut hs =
+                                    horizon_client::effects::EffectInstance::new("haste", 400, 2);
+                                hs.ambient = true;
+                                hs.visible = false;
+                                hs.show_icon = false;
+                                self.potions.effects.list.push(hs);
+                            }
+                        }
+                    } else if raven.fastmine_was_active {
+                        raven.fastmine_was_active = false;
+                        self.potions
+                            .effects
+                            .list
+                            .retain(|e| !(e.id == "haste" && e.ambient && !e.show_icon));
+                    }
+
+                    // 4. Reach & HitBox expansion
+                    if raven.cfg.reach_enabled {
+                        self.entity_reach = self.entity_reach.max(raven.cfg.reach_max);
+                        self.block_reach = self.block_reach.max(raven.cfg.reach_max + 1.0);
+                    }
+                    if raven.cfg.hitbox_enabled {
+                        self.entity_reach =
+                            self.entity_reach.max(3.2 + raven.cfg.hitbox_expand * 2.5);
+                    }
+
+                    // 5. DelayRemover & FastPlace
+                    if raven.cfg.delay_remover_enabled {
+                        self.destroy_delay = 0;
+                        self.clicks.miss_time = 0;
+                    }
+                    if raven.cfg.fast_place_enabled {
+                        self.use_delay = self.use_delay.min(u32::from(raven.cfg.fast_place_delay));
+                        // On iPad, holding a finger on a block holds MouseButton::Left (mine).
+                        // If FastPlace is ON and holding a placeable block, convert hold into rapid right-click placement!
+                        let holding_block = self
+                            .inventory
+                            .get(self.selected)
+                            .and_then(|s| s.as_ref())
+                            .and_then(|st| self.items().get(&st.item))
+                            .is_some_and(|info| info.block.is_some());
+                        if holding_block
+                            && (self.right || self.touch.holding.is_some())
+                            && self.ticks
+                                % u64::from(raven.cfg.fast_place_delay).saturating_add(1)
+                                == 0
+                        {
+                            self.stop_remote_mining();
+                            trigger_right_click = true;
+                        }
+                    }
+
+                    // 6. Sprint, NoSlow, NoFall, Velocity, JumpReset, Fly, Speed, BHop, LongJump, Step, Dolphin
+                    if let Some(p) = self.player.as_mut() {
+                        if raven.cfg.sprint_enabled && is_moving {
+                            p.sprinting = true;
+                        }
+                        if raven.cfg.nofall_enabled || raven.cfg.fly_enabled {
+                            p.fall_distance = 0.0;
+                            p.ground.on_ground = true;
+                        }
+                        if raven.cfg.noslow_enabled {
+                            p.item_use_speed = Some(1.0);
+                            p.item_use_slows_sprint = false;
+                        }
+                        if raven.cfg.auto_jump_enabled {
+                            p.auto_jump_enabled = true;
+                        }
+
+                        // Velocity & JumpReset on hurt tick
+                        if p.health.hurt.cooldown > 0 {
+                            if raven.cfg.jump_reset_enabled
+                                && on_ground
+                                && p.health.hurt.cooldown >= 8
+                            {
+                                p.velocity.y = 0.42;
+                            }
+                            if raven.cfg.velocity_enabled && p.health.hurt.cooldown >= 8 {
+                                let h = f64::from(raven.cfg.velocity_horizontal) / 100.0;
+                                let v = f64::from(raven.cfg.velocity_vertical) / 100.0;
+                                p.velocity.x *= h;
+                                p.velocity.z *= h;
+                                p.velocity.y *= v;
+                            }
+                            if raven.cfg.no_hurt_cam_enabled {
+                                p.health.hurt.cooldown = 0;
+                            }
+                        }
+
+                        // VClip
+                        if raven.cfg.vclip_enabled {
+                            p.position.y += raven.cfg.vclip_distance;
+                            p.velocity.y = 0.0;
+                            p.teleported = true;
+                            raven.cfg.vclip_enabled = false;
+                        }
+
+                        // StopMotion / Stasis
+                        if raven.cfg.stop_motion_enabled || raven.cfg.stasis_enabled {
+                            p.velocity = Vec3::ZERO;
+                            raven.cfg.stop_motion_enabled = false;
+                        }
+
+                        // Fly & Freecam
+                        if raven.cfg.fly_enabled || raven.cfg.freecam_enabled {
+                            let spd = if raven.cfg.freecam_enabled {
+                                raven.cfg.freecam_speed * 0.48
                             } else {
-                                raven.cfg.speed_multiplier
+                                raven.cfg.fly_speed * 0.45
                             };
-                            let base_spd = 0.2873 * mult;
                             if is_moving {
-                                p.velocity.x = dir_x * base_spd;
-                                p.velocity.z = dir_z * base_spd;
-                                if on_ground
-                                    && (raven.cfg.bhop_enabled
-                                        || matches!(
-                                            raven.cfg.speed_mode,
-                                            $crate::raven_bs::SpeedMode::BHop
-                                                | $crate::raven_bs::SpeedMode::HypixelLowHop
-                                        ))
-                                {
-                                    p.velocity.y = 0.42;
-                                } else if raven.cfg.speed_mode
-                                    == $crate::raven_bs::SpeedMode::HypixelLowHop
-                                    && raven.air_ticks == 4
-                                {
-                                    p.velocity.y = -0.098;
+                                p.velocity.x = dir_x * spd;
+                                p.velocity.z = dir_z * spd;
+                            } else {
+                                p.velocity.x = 0.0;
+                                p.velocity.z = 0.0;
+                            }
+                            p.velocity.y = match raven.cfg.fly_mode {
+                                $crate::raven_bs::FlyMode::Vanilla
+                                | $crate::raven_bs::FlyMode::Motion => {
+                                    if jump_held {
+                                        spd * 0.75
+                                    } else if sneak_held {
+                                        -spd * 0.75
+                                    } else {
+                                        0.04 // Counteract gravity during simulation tick
+                                    }
+                                }
+                                $crate::raven_bs::FlyMode::Glide => {
+                                    if jump_held {
+                                        spd * 0.65
+                                    } else {
+                                        -0.01
+                                    }
+                                }
+                                $crate::raven_bs::FlyMode::AirWalk => {
+                                    p.ground.on_ground = true;
+                                    0.04
+                                }
+                            };
+                        } else {
+                            // Speed / BHop / Boost
+                            if raven.cfg.speed_enabled
+                                || raven.cfg.bhop_enabled
+                                || raven.cfg.boost_enabled
+                            {
+                                let mult = if raven.cfg.boost_enabled {
+                                    raven.cfg.speed_multiplier.max(1.65)
+                                } else {
+                                    raven.cfg.speed_multiplier
+                                };
+                                let base_spd = 0.29 * mult;
+                                if is_moving {
+                                    p.velocity.x = dir_x * base_spd;
+                                    p.velocity.z = dir_z * base_spd;
+                                    if on_ground
+                                        && (raven.cfg.bhop_enabled
+                                            || matches!(
+                                                raven.cfg.speed_mode,
+                                                $crate::raven_bs::SpeedMode::BHop
+                                                    | $crate::raven_bs::SpeedMode::HypixelLowHop
+                                            ))
+                                    {
+                                        p.velocity.y = 0.42;
+                                    } else if raven.cfg.speed_mode
+                                        == $crate::raven_bs::SpeedMode::HypixelLowHop
+                                        && raven.air_ticks == 4
+                                    {
+                                        p.velocity.y = -0.098;
+                                    }
                                 }
                             }
-                        }
 
-                        // LongJump
-                        if raven.cfg.long_jump_enabled && is_moving {
-                            if on_ground {
-                                p.velocity.y = 0.44;
-                                let lj_spd = 0.35 * raven.cfg.long_jump_boost;
-                                p.velocity.x = dir_x * lj_spd;
-                                p.velocity.z = dir_z * lj_spd;
-                            } else if raven.air_ticks <= 10 {
-                                p.velocity.y += 0.022;
+                            // LongJump
+                            if raven.cfg.long_jump_enabled && is_moving {
+                                if on_ground {
+                                    p.velocity.y = 0.44;
+                                    let lj_spd = 0.36 * raven.cfg.long_jump_boost;
+                                    p.velocity.x = dir_x * lj_spd;
+                                    p.velocity.z = dir_z * lj_spd;
+                                } else if raven.air_ticks <= 10 {
+                                    p.velocity.y += 0.024;
+                                }
+                            }
+
+                            // InstantStop
+                            if raven.cfg.instant_stop_enabled && !is_moving && on_ground {
+                                p.velocity.x = 0.0;
+                                p.velocity.z = 0.0;
                             }
                         }
 
-                        // InstantStop
-                        if raven.cfg.instant_stop_enabled && !is_moving && on_ground {
-                            p.velocity.x = 0.0;
-                            p.velocity.z = 0.0;
-                        }
-                    }
-
-                    // Dolphin (water boost)
-                    if raven.cfg.dolphin_enabled && in_liquid {
-                        p.velocity.y = 0.12;
-                        if is_moving {
-                            p.velocity.x = dir_x * 0.36;
-                            p.velocity.z = dir_z * 0.36;
-                        }
-                    }
-                }
-
-                // 7. Step (auto step up 1 to 2 block walls when colliding horizontally)
-                if raven.cfg.step_enabled && is_moving && on_ground {
-                    let front_x = (p_pos[0] + dir_x * 0.6).floor() as i32;
-                    let front_y = p_pos[1].floor() as i32;
-                    let front_z = (p_pos[2] + dir_z * 0.6).floor() as i32;
-                    let wall_low = !self.res.facts().is_air(self.world.block(front_x, front_y, front_z));
-                    let wall_high = self.res.facts().is_air(self.world.block(front_x, front_y + 1, front_z))
-                        && self.res.facts().is_air(self.world.block(front_x, front_y + 2, front_z));
-                    if wall_low && wall_high {
-                        if let Some(p) = self.player.as_mut() {
+                        // Step (when colliding horizontally with a block wall)
+                        if raven.cfg.step_enabled && is_moving && on_ground && horiz_col {
                             p.position.y += f64::from(raven.cfg.step_height.clamp(1.0, 2.0));
+                            p.velocity.y = 0.0;
+                        }
+
+                        // Dolphin
+                        if raven.cfg.dolphin_enabled && in_liquid {
+                            p.velocity.y = 0.14;
+                            if is_moving {
+                                p.velocity.x = dir_x * 0.38;
+                                p.velocity.z = dir_z * 0.38;
+                            }
                         }
                     }
-                }
 
-                // 8. SafeWalk & BridgeAssist (prevent falling off block edge)
-                if (raven.cfg.safewalk_enabled || raven.cfg.bridge_assist_enabled) && on_ground {
-                    if let Some(p) = self.player.as_mut() {
-                        let next_x = (p.position.x + p.velocity.x * 1.5).floor() as i32;
-                        let next_y = (p.position.y - 0.5).floor() as i32;
-                        let next_z = (p.position.z + p.velocity.z * 1.5).floor() as i32;
-                        if self.res.facts().is_air(self.world.block(next_x, next_y, next_z)) {
-                            if raven.cfg.safewalk_enabled {
+                    // 7. SafeWalk & BridgeAssist
+                    if (raven.cfg.safewalk_enabled || raven.cfg.bridge_assist_enabled) && on_ground
+                    {
+                        if let Some(p) = self.player.as_mut() {
+                            let next_x = (p.position.x + p.velocity.x * 1.6).floor() as i32;
+                            let next_y = (p.position.y - 0.5).floor() as i32;
+                            let next_z = (p.position.z + p.velocity.z * 1.6).floor() as i32;
+                            if self
+                                .res
+                                .facts()
+                                .is_air(self.world.block(next_x, next_y, next_z))
+                            {
                                 p.velocity.x = 0.0;
                                 p.velocity.z = 0.0;
                             }
                         }
                     }
-                }
 
-                // 9. WaterBucket MLG
-                if raven.cfg.water_bucket_enabled {
-                    let falling_far = self
-                        .player
-                        .as_ref()
-                        .is_some_and(|p| p.fall_distance > 3.5);
-                    if falling_far {
-                        let bx = p_pos[0].floor() as i32;
-                        let by = (p_pos[1] - 2.0).floor() as i32;
-                        let bz = p_pos[2].floor() as i32;
-                        if !self.res.facts().is_air(self.world.block(bx, by, bz)) {
-                            if let Some(slot) = self.inventory.iter().take(9).position(|s| {
-                                s.as_ref().is_some_and(|it| &*it.item == "minecraft:water_bucket")
-                            }) {
-                                self.selected = slot;
-                                self.pitch = 90.0;
-                                self.use_clicks = self.use_clicks.saturating_add(1);
-                                if let Some(p) = self.player.as_mut() {
-                                    p.fall_distance = 0.0;
-                                }
-                            }
-                        }
-                    }
-                }
+                    // 8. Combat: KillAura, AimAssist, AutoClicker, HitBox, TPAura
+                    let eye = self
+                        .eye_position()
+                        .unwrap_or([p_pos[0], p_pos[1] + 1.62, p_pos[2]]);
+                    let ka_range = raven.cfg.killaura_range;
+                    let aa_range = raven.cfg.aim_assist_distance;
+                    let tp_range = raven.cfg.tp_aura_range;
+                    let search_range = ka_range.max(aa_range).max(tp_range);
 
-                // 10. AutoTool (auto-select best tool when mining or best sword when fighting)
-                if raven.cfg.auto_tool_enabled {
-                    if let Some(ref m) = self.mining {
-                        let state = self.world.block(m.pos[0], m.pos[1], m.pos[2]);
-                        let bname = &self.res.facts().get(state).name;
-                        let want = if bname.contains("stone")
-                            || bname.contains("ore")
-                            || bname.contains("obsidian")
-                            || bname.contains("brick")
-                        {
-                            "pickaxe"
-                        } else if bname.contains("log")
-                            || bname.contains("planks")
-                            || bname.contains("wood")
-                        {
-                            "axe"
-                        } else if bname.contains("dirt")
-                            || bname.contains("grass")
-                            || bname.contains("sand")
-                            || bname.contains("gravel")
-                        {
-                            "shovel"
-                        } else {
-                            ""
-                        };
-                        if !want.is_empty() {
-                            if let Some(slot) = self.inventory.iter().take(9).position(|s| {
-                                s.as_ref().is_some_and(|it| it.item.contains(want))
-                            }) {
-                                self.selected = slot;
-                            }
-                        }
-                    }
-                }
-
-                // 11. ChestStealer (loot open chest into player inventory)
-                if raven.cfg.chest_stealer_enabled
-                    && self.ticks % raven.cfg.chest_stealer_delay_ticks.max(1) == 0
-                {
-                    if let Some(key) = self.container {
-                        if let Some(BlockEntity::Chest(slots)) =
-                            self.world.block_entities.get_mut(&key)
-                        {
-                            for slot in slots.iter_mut() {
-                                if let Some(mut st) = slot.take() {
-                                    if &*st.item != "minecraft:air" && st.count > 0 {
-                                        let leftover = inventory_add(
-                                            &mut self.inventory,
-                                            &mut self.offhand,
-                                            self.selected,
-                                            64,
-                                            &mut st,
-                                        );
-                                        if leftover && st.count > 0 {
-                                            *slot = Some(st);
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 12. KillAura, AimAssist, AutoClicker, TPAura & AntiFireball
-                let eye = self.eye_position().unwrap_or([p_pos[0], p_pos[1] + 1.62, p_pos[2]]);
-                let ka_range = raven.cfg.killaura_range;
-                let aa_range = raven.cfg.aim_assist_distance;
-                let tp_range = raven.cfg.tp_aura_range;
-                let search_range = ka_range.max(aa_range).max(tp_range);
-
-                let mut targets: Vec<(usize, [f64; 3], f64, String, f32, f32)> = self
-                    .mobs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, m)| !m.removed && m.alive() && Some(m.id) != self.riding)
-                    .filter_map(|(idx, m)| {
-                        let tpos = [
-                            m.position.x,
-                            m.position.y + f64::from(m.height()) * 0.75,
-                            m.position.z,
-                        ];
-                        let dx = tpos[0] - eye[0];
-                        let dy = tpos[1] - eye[1];
-                        let dz = tpos[2] - eye[2];
-                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                        if dist <= search_range {
-                            let clean_name = m
-                                .kind
-                                .id
-                                .trim_start_matches("minecraft:")
-                                .replace('_', " ");
-                            Some((idx, tpos, dist, clean_name, 20.0, 20.0))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                targets.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
-
-                if let Some((_, tpos, dist, ref name, hp, max_hp)) = targets.first() {
-                    raven.target_info = Some((name.clone(), *hp, *max_hp, *dist));
-
-                    // AimAssist
-                    if raven.cfg.aim_assist_enabled && *dist <= aa_range {
-                        let desired = $crate::raven_bs::calc_angles(eye, *tpos);
-                        let fov_diff = $crate::raven_bs::wrap_deg(desired.0 - self.yaw).abs();
-                        if fov_diff <= raven.cfg.aim_assist_fov {
-                            let (nyaw, npitch) = $crate::raven_bs::smooth_rot(
-                                (self.yaw, self.pitch),
-                                desired,
-                                raven.cfg.aim_assist_speed,
-                            );
-                            self.yaw = nyaw;
-                            self.pitch = npitch;
-                        }
-                    }
-
-                    // TPAura
-                    if raven.cfg.tp_aura_enabled && *dist <= tp_range && self.ticks % 6 == 0 {
-                        if let Some(p) = self.player.as_mut() {
-                            p.position = Vec3::new(tpos[0], tpos[1] - 0.5, tpos[2]);
-                            p.teleported = true;
-                        }
-                    }
-                } else {
-                    raven.target_info = None;
-                }
-
-                // KillAura execution
-                if raven.cfg.killaura_enabled {
-                    let in_ka: Vec<_> = targets
+                    let mut targets: Vec<(usize, [f64; 3], f64, String, f32, f32)> = self
+                        .mobs
                         .iter()
-                        .filter(|(_, _, d, _, _, _)| *d <= ka_range)
+                        .enumerate()
+                        .filter(|(_, m)| !m.removed && m.alive() && Some(m.id) != self.riding)
+                        .filter_map(|(idx, m)| {
+                            let tpos = [
+                                m.position.x,
+                                m.position.y + f64::from(m.height()) * 0.55,
+                                m.position.z,
+                            ];
+                            let dx = tpos[0] - eye[0];
+                            let dy = tpos[1] - eye[1];
+                            let dz = tpos[2] - eye[2];
+                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                            if dist <= search_range {
+                                let clean_name = m
+                                    .kind
+                                    .id
+                                    .trim_start_matches("minecraft:")
+                                    .replace('_', " ");
+                                Some((
+                                    idx,
+                                    tpos,
+                                    dist,
+                                    clean_name,
+                                    m.health.max(1.0),
+                                    20.0,
+                                ))
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
-                    if !in_ka.is_empty() {
-                        let pick_i = raven.switch_idx % in_ka.len();
-                        let (_, tpos, _, _, _, _) = in_ka[pick_i];
-                        let desired = $crate::raven_bs::calc_angles(eye, *tpos);
-                        let (nyaw, npitch) = $crate::raven_bs::smooth_rot(
-                            (self.yaw, self.pitch),
-                            desired,
-                            raven.cfg.killaura_rot_speed,
-                        );
-                        // Keep camera steady with posed_rotation while server/aim yaw points at target!
-                        if self.posed_rotation.is_none() {
-                            self.posed_rotation = Some((self.yaw, self.pitch));
-                        }
-                        self.yaw = nyaw;
-                        self.pitch = npitch;
 
-                        // AutoSwap to sword if enabled
-                        if raven.cfg.auto_swap_enabled {
-                            if let Some(sword_slot) =
-                                self.inventory.iter().take(9).position(|s| {
-                                    s.as_ref().is_some_and(|it| it.item.contains("sword"))
-                                })
-                            {
-                                self.selected = sword_slot;
+                    targets.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+
+                    if let Some(&(mob_idx, tpos, dist, ref name, hp, max_hp)) = targets.first() {
+                        raven.target_info = Some((name.clone(), hp, max_hp, dist));
+
+                        // AimAssist
+                        if raven.cfg.aim_assist_enabled && dist <= aa_range {
+                            let desired = $crate::raven_bs::calc_angles(eye, tpos);
+                            let fov_diff =
+                                $crate::raven_bs::wrap_deg(desired.0 - self.yaw).abs();
+                            if fov_diff <= raven.cfg.aim_assist_fov {
+                                let (nyaw, npitch) = $crate::raven_bs::smooth_rot(
+                                    (self.yaw, self.pitch),
+                                    desired,
+                                    raven.cfg.aim_assist_speed,
+                                );
+                                self.yaw = nyaw;
+                                self.pitch = npitch;
                             }
                         }
 
+                        // HitBox magnetic aim assist when attacking near a mob
+                        if raven.cfg.hitbox_enabled
+                            && dist <= self.entity_reach
+                            && (self.left || self.touch.holding.is_some())
+                        {
+                            let desired = $crate::raven_bs::calc_angles(eye, tpos);
+                            if $crate::raven_bs::wrap_deg(desired.0 - self.yaw).abs() <= 25.0 {
+                                self.yaw = desired.0;
+                                self.pitch = desired.1;
+                            }
+                        }
+
+                        // TPAura
+                        if raven.cfg.tp_aura_enabled && dist <= tp_range && self.ticks % 6 == 0 {
+                            if let Some(p) = self.player.as_mut() {
+                                p.position = Vec3::new(tpos[0], tpos[1] - 0.3, tpos[2]);
+                                p.teleported = true;
+                            }
+                        }
+
+                        // KillAura
+                        if raven.cfg.killaura_enabled && dist <= ka_range {
+                            let _ = mob_idx;
+                            let desired = $crate::raven_bs::calc_angles(eye, tpos);
+                            // Lock exact aim onto target bounding box so `mob_hit_within` hits 100% of the time
+                            self.yaw = desired.0;
+                            self.pitch = desired.1;
+                            self.entity_reach = self.entity_reach.max(ka_range + 0.5);
+
+                            if raven.cfg.auto_swap_enabled || raven.cfg.auto_tool_enabled {
+                                if let Some(sword_slot) =
+                                    self.inventory.iter().take(9).position(|s| {
+                                        s.as_ref().is_some_and(|it| {
+                                            it.item.contains("sword") || it.item.contains("axe")
+                                        })
+                                    })
+                                {
+                                    self.selected = sword_slot;
+                                }
+                            }
+
+                            let r = raven.rand_f32();
+                            let cps = raven.cfg.killaura_min_cps
+                                + r * (raven.cfg.killaura_max_cps - raven.cfg.killaura_min_cps);
+                            let delay = Duration::from_secs_f32(1.0 / cps.max(1.0));
+                            if raven.last_attack.elapsed() >= delay {
+                                raven.last_attack = Instant::now();
+                                raven.switch_idx = raven.switch_idx.wrapping_add(1);
+                                raven.lmb_clicks.push_back(raven.last_attack);
+                                trigger_left_click = true;
+                                if raven.cfg.autoblock_enabled {
+                                    trigger_right_click = true;
+                                }
+                            }
+                        }
+                    } else {
+                        raven.target_info = None;
+                    }
+
+                    // AutoClicker
+                    if raven.cfg.autoclicker_enabled && (self.left || self.touch.holding.is_some())
+                    {
                         let r = raven.rand_f32();
-                        let cps = raven.cfg.killaura_min_cps
-                            + r * (raven.cfg.killaura_max_cps - raven.cfg.killaura_min_cps);
+                        let cps = raven.cfg.autoclicker_min_cps
+                            + r * (raven.cfg.autoclicker_max_cps - raven.cfg.autoclicker_min_cps);
                         let delay = Duration::from_secs_f32(1.0 / cps.max(1.0));
                         if raven.last_attack.elapsed() >= delay {
                             raven.last_attack = Instant::now();
-                            raven.switch_idx = raven.switch_idx.wrapping_add(1);
                             raven.lmb_clicks.push_back(raven.last_attack);
-                            self.entity_reach = self.entity_reach.max(ka_range);
-                            self.attack_clicks = self.attack_clicks.saturating_add(1);
-                            self.swing_arm();
-                            if raven.cfg.autoblock_enabled {
-                                self.use_clicks = self.use_clicks.saturating_add(1);
+                            trigger_left_click = true;
+                            if raven.cfg.autoclicker_jitter > 0.0 {
+                                let jx =
+                                    (raven.rand_f32() - 0.5) * raven.cfg.autoclicker_jitter;
+                                let jy =
+                                    (raven.rand_f32() - 0.5) * raven.cfg.autoclicker_jitter;
+                                self.yaw = $crate::raven_bs::wrap_deg(self.yaw + jx);
+                                self.pitch = (self.pitch + jy).clamp(-90.0, 90.0);
                             }
                         }
-                    } else if !raven.cfg.freelook_enabled {
-                        self.posed_rotation = None;
-                    }
-                }
-
-                // AutoClicker execution
-                if raven.cfg.autoclicker_enabled && (self.left || self.touch.holding.is_some()) {
-                    let r = raven.rand_f32();
-                    let cps = raven.cfg.autoclicker_min_cps
-                        + r * (raven.cfg.autoclicker_max_cps - raven.cfg.autoclicker_min_cps);
-                    let delay = Duration::from_secs_f32(1.0 / cps.max(1.0));
-                    if raven.last_attack.elapsed() >= delay {
-                        raven.last_attack = Instant::now();
-                        raven.lmb_clicks.push_back(raven.last_attack);
-                        self.attack_clicks = self.attack_clicks.saturating_add(1);
-                        self.swing_arm();
-                        if raven.cfg.autoclicker_jitter > 0.0 {
-                            let jx = (raven.rand_f32() - 0.5) * raven.cfg.autoclicker_jitter;
-                            let jy = (raven.rand_f32() - 0.5) * raven.cfg.autoclicker_jitter;
-                            self.yaw = $crate::raven_bs::wrap_deg(self.yaw + jx);
-                            self.pitch = (self.pitch + jy).clamp(-90.0, 90.0);
-                        }
-                    }
-                }
-
-                // 13. Scaffold (with HypixelJump / Telly Schedule / Tower / Auto-Block Pick)
-                if raven.cfg.scaffold_enabled {
-                    let block_slot = self.inventory.iter().take(9).position(|s| {
-                        s.as_ref().is_some_and(|st| {
-                            st.count > 0
-                                && self.pack.assets.registry.default_state(&st.item).is_some()
-                                && !self
-                                    .res
-                                    .facts()
-                                    .is_air(self.pack.assets.registry.default_state(&st.item).unwrap())
-                        })
-                    });
-
-                    if let Some(slot) = block_slot {
-                        self.selected = slot;
                     }
 
-                    // Tower up when holding jump
-                    if raven.cfg.scaffold_tower && jump_held && !is_moving {
-                        if let Some(p) = self.player.as_mut() {
-                            p.velocity.y = 0.42;
+                    // 9. Scaffold (uses `self.forced_hit` + right-click so `remote_use_item_on` places on Server & Client!)
+                    if raven.cfg.scaffold_enabled {
+                        // Pick first hotbar slot containing a placeable block
+                        if let Some(slot) = self.inventory.iter().take(9).position(|s| {
+                            s.as_ref().is_some_and(|st| {
+                                st.count > 0
+                                    && self
+                                        .items()
+                                        .get(&st.item)
+                                        .is_some_and(|info| info.block.is_some())
+                            })
+                        }) {
+                            self.selected = slot;
                         }
-                    }
 
-                    // HypixelJump sprint modes
-                    if is_moving
-                        && on_ground
-                        && matches!(
-                            raven.cfg.scaffold_sprint,
-                            $crate::raven_bs::ScaffoldSprintMode::JumpSprint
-                                | $crate::raven_bs::ScaffoldSprintMode::HypixelJumpSprint
-                                | $crate::raven_bs::ScaffoldSprintMode::HypixelJump2Sprint
-                                | $crate::raven_bs::ScaffoldSprintMode::HypixelJump3Sprint
-                        )
-                    {
-                        if let Some(p) = self.player.as_mut() {
-                            p.velocity.y = 0.42;
+                        // Tower upwards when holding Jump
+                        if raven.cfg.scaffold_tower && jump_held {
+                            if let Some(p) = self.player.as_mut() {
+                                p.velocity.y = 0.42;
+                            }
                         }
-                    }
 
-                    // Telly schedule check
-                    let can_place = match raven.cfg.scaffold_schedule {
-                        $crate::raven_bs::ScaffoldScheduleMode::Normal => true,
-                        $crate::raven_bs::ScaffoldScheduleMode::SimpleTelly => {
-                            raven.air_ticks == 0 || raven.air_ticks >= 2
-                        }
-                        $crate::raven_bs::ScaffoldScheduleMode::Telly => {
-                            raven.air_ticks == 0 || raven.air_ticks >= 3
-                        }
-                    };
-
-                    if can_place {
-                        let under = [
-                            p_pos[0].floor() as i32,
-                            (p_pos[1] - 1.0).floor() as i32,
-                            p_pos[2].floor() as i32,
-                        ];
-                        if self
-                            .res
-                            .facts()
-                            .is_air(self.world.block(under[0], under[1], under[2]))
+                        // HypixelJump / JumpSprint
+                        if is_moving
+                            && on_ground
+                            && matches!(
+                                raven.cfg.scaffold_sprint,
+                                $crate::raven_bs::ScaffoldSprintMode::JumpSprint
+                                    | $crate::raven_bs::ScaffoldSprintMode::HypixelJumpSprint
+                                    | $crate::raven_bs::ScaffoldSprintMode::HypixelJump2Sprint
+                                    | $crate::raven_bs::ScaffoldSprintMode::HypixelJump3Sprint
+                            )
                         {
-                            let state_to_place = self
-                                .inventory
-                                .get(self.selected)
-                                .and_then(|s| s.as_ref())
-                                .and_then(|st| self.pack.assets.registry.default_state(&st.item))
-                                .or_else(|| {
-                                    self.pack.assets.registry.default_state("minecraft:white_wool")
-                                });
+                            if let Some(p) = self.player.as_mut() {
+                                p.velocity.y = 0.42;
+                            }
+                        }
 
-                            if let Some(state) = state_to_place {
-                                drop(raven);
-                                let _ = self.level_set(under, state);
-                                self.swing_arm();
-                                if !self.creative {
-                                    if let Some(Some(st)) = self.inventory.get_mut(self.selected) {
-                                        st.count = st.count.saturating_sub(1);
-                                        if st.count == 0 {
-                                            self.inventory[self.selected] = None;
-                                        }
+                        let can_place = match raven.cfg.scaffold_schedule {
+                            $crate::raven_bs::ScaffoldScheduleMode::Normal => true,
+                            $crate::raven_bs::ScaffoldScheduleMode::SimpleTelly => {
+                                raven.air_ticks == 0 || raven.air_ticks >= 2
+                            }
+                            $crate::raven_bs::ScaffoldScheduleMode::Telly => {
+                                raven.air_ticks == 0 || raven.air_ticks >= 3
+                            }
+                        };
+
+                        if can_place {
+                            let under = [
+                                p_pos[0].floor() as i32,
+                                (p_pos[1] - 1.0).floor() as i32,
+                                p_pos[2].floor() as i32,
+                            ];
+                            let ahead = [
+                                (p_pos[0] + dir_x * 0.45).floor() as i32,
+                                (p_pos[1] - 1.0).floor() as i32,
+                                (p_pos[2] + dir_z * 0.45).floor() as i32,
+                            ];
+                            let place_hit = self
+                                .raven_find_place_hit(under)
+                                .or_else(|| self.raven_find_place_hit(ahead));
+
+                            if let Some(hit) = place_hit {
+                                self.forced_hit = Some(hit);
+                                self.use_delay = 0;
+                                trigger_right_click = true;
+                                raven.blocks_placed_session =
+                                    raven.blocks_placed_session.saturating_add(1);
+                            }
+                        }
+                    }
+
+                    // 10. BlockIn (surround player with blocks via `forced_hit` + right-click)
+                    if raven.cfg.block_in_enabled && self.forced_hit.is_none() {
+                        let bx = p_pos[0].floor() as i32;
+                        let by = p_pos[1].floor() as i32;
+                        let bz = p_pos[2].floor() as i32;
+                        let surround = [
+                            [bx + 1, by, bz],
+                            [bx - 1, by, bz],
+                            [bx, by, bz + 1],
+                            [bx, by, bz - 1],
+                            [bx + 1, by + 1, bz],
+                            [bx - 1, by + 1, bz],
+                            [bx, by + 1, bz + 1],
+                            [bx, by + 1, bz - 1],
+                            [bx, by + 2, bz],
+                        ];
+                        for pos in surround {
+                            if let Some(hit) = self.raven_find_place_hit(pos) {
+                                self.forced_hit = Some(hit);
+                                self.use_delay = 0;
+                                trigger_right_click = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // 11. BedAura (find bed within range, set `forced_hit` and mine it)
+                    if raven.cfg.bed_aura_enabled && self.forced_hit.is_none() {
+                        let r = raven.cfg.bed_aura_range.ceil() as i32;
+                        let px = p_pos[0].floor() as i32;
+                        let py = p_pos[1].floor() as i32;
+                        let pz = p_pos[2].floor() as i32;
+                        'bed_loop: for dx in -r..=r {
+                            for dy in -r..=r {
+                                for dz in -r..=r {
+                                    let bp = [px + dx, py + dy, pz + dz];
+                                    let st = self.world.block(bp[0], bp[1], bp[2]);
+                                    if self.res.facts().get(st).name.ends_with("_bed") {
+                                        self.forced_hit = Some(Hit {
+                                            pos: bp,
+                                            face: [0, 1, 0],
+                                            point: [
+                                                f64::from(bp[0]) + 0.5,
+                                                f64::from(bp[1]) + 0.5,
+                                                f64::from(bp[2]) + 0.5,
+                                            ],
+                                            inside: false,
+                                        });
+                                        self.destroy_delay = 0;
+                                        trigger_left_click = true;
+                                        break 'bed_loop;
                                     }
                                 }
-                                if let Ok(mut r) = $crate::raven_bs::global_raven().lock() {
-                                    r.blocks_placed_session =
-                                        r.blocks_placed_session.saturating_add(1);
-                                }
-                                return;
                             }
                         }
                     }
-                }
 
-                // 14. BedAura (auto break beds within range)
-                if raven.cfg.bed_aura_enabled {
-                    let r = raven.cfg.bed_aura_range.ceil() as i32;
-                    let px = p_pos[0].floor() as i32;
-                    let py = p_pos[1].floor() as i32;
-                    let pz = p_pos[2].floor() as i32;
-                    let mut found_bed = None;
-                    'bed_scan: for dx in -r..=r {
-                        for dy in -r..=r {
-                            for dz in -r..=r {
-                                let bp = [px + dx, py + dy, pz + dz];
-                                let st = self.world.block(bp[0], bp[1], bp[2]);
-                                if self.res.facts().get(st).name.ends_with("_bed") {
-                                    found_bed = Some(bp);
-                                    break 'bed_scan;
-                                }
-                            }
-                        }
-                    }
-                    if let Some(bed_pos) = found_bed {
-                        drop(raven);
-                        let _ = self.break_block_as_player(bed_pos);
-                        self.swing_arm();
-                        return;
+                    // 12. Weather Clear
+                    if raven.cfg.weather_clear {
+                        self.world.weather.raining = false;
+                        self.world.weather.thundering = false;
+                        self.world.weather.rain_level = (0.0, 0.0);
+                        self.world.weather.thunder_level = (0.0, 0.0);
                     }
                 }
 
-                // 15. BlockIn (surround player with blocks)
-                if raven.cfg.block_in_enabled {
-                    let bx = p_pos[0].floor() as i32;
-                    let by = p_pos[1].floor() as i32;
-                    let bz = p_pos[2].floor() as i32;
-                    let surround = [
-                        [bx + 1, by, bz],
-                        [bx - 1, by, bz],
-                        [bx, by, bz + 1],
-                        [bx, by, bz - 1],
-                        [bx + 1, by + 1, bz],
-                        [bx - 1, by + 1, bz],
-                        [bx, by + 1, bz + 1],
-                        [bx, by + 1, bz - 1],
-                        [bx, by + 2, bz],
-                    ];
-                    if let Some(wall_state) = self
-                        .pack
-                        .assets
-                        .registry
-                        .default_state("minecraft:oak_planks")
-                    {
-                        for pos in surround {
-                            if self
-                                .res
-                                .facts()
-                                .is_air(self.world.block(pos[0], pos[1], pos[2]))
-                            {
-                                drop(raven);
-                                let _ = self.level_set(pos, wall_state);
-                                return;
-                            }
-                        }
-                    }
+                // Dispatch queued clicks through `play_mouse` so `remote_handle_input()` executes them!
+                if trigger_left_click {
+                    let _ = self.play_mouse(MouseButton::Left, true);
+                    let _ = self.play_mouse(MouseButton::Left, false);
                 }
-
-                // 16. Weather clear
-                if raven.cfg.weather_clear {
-                    self.world.weather.raining = false;
-                    self.world.weather.thundering = false;
+                if trigger_right_click {
+                    let _ = self.play_mouse(MouseButton::Right, true);
+                    let _ = self.play_mouse(MouseButton::Right, false);
                 }
             }
 
@@ -2468,7 +2542,9 @@ macro_rules! impl_raven_game {
                         .rmb_clicks
                         .retain(|t| now.duration_since(*t) <= Duration::from_secs(1));
                     (
-                        raven.cfg.player_esp_enabled || raven.cfg.mob_esp_enabled || raven.cfg.chams_enabled,
+                        raven.cfg.player_esp_enabled
+                            || raven.cfg.mob_esp_enabled
+                            || raven.cfg.chams_enabled,
                         raven.cfg.item_esp_enabled,
                         raven.cfg.bed_esp_enabled,
                         raven.cfg.chest_esp_enabled,
@@ -2485,7 +2561,6 @@ macro_rules! impl_raven_game {
                 let sw = batch.width;
                 let sh = batch.height;
 
-                // 3D -> 2D projection helper using `self.camera_orientation()`
                 let eye = self.eye_position().unwrap_or([0.0, 64.0, 0.0]);
                 let inv_rot = self.camera_orientation().inverse();
                 let fov_rad = (self.settings.fov as f32).clamp(30.0, 120.0).to_radians();
@@ -2514,7 +2589,6 @@ macro_rules! impl_raven_game {
                     }
                 };
 
-                // 1. PlayerESP / MobESP / Tracers / Nametags
                 if esp_mobs || tracers || nametags {
                     for m in &self.mobs {
                         if m.removed || !m.alive() || Some(m.id) == self.riding {
@@ -2585,17 +2659,22 @@ macro_rules! impl_raven_game {
                     }
                 }
 
-                // 2. ItemESP
                 if esp_items {
                     for item in &self.dropped {
                         let ipos = [item.position.x, item.position.y + 0.25, item.position.z];
                         if let Some((ix, iy, _)) = project(ipos) {
-                            batch.fill(atlas, ix - 3.0, iy - 3.0, 6.0, 6.0, rgba(241, 196, 15, 230));
+                            batch.fill(
+                                atlas,
+                                ix - 3.0,
+                                iy - 3.0,
+                                6.0,
+                                6.0,
+                                rgba(241, 196, 15, 230),
+                            );
                         }
                     }
                 }
 
-                // 3. ChestESP & BedESP
                 if esp_chests || esp_beds {
                     let px = eye[0].floor() as i32;
                     let py = eye[1].floor() as i32;
@@ -2603,9 +2682,11 @@ macro_rules! impl_raven_game {
                     if esp_chests {
                         for &(cx, cy, cz) in self.world.block_entities.keys() {
                             if (cx - px).abs() <= 32 && (cz - pz).abs() <= 32 {
-                                if let Some((sx, sy, _)) =
-                                    project([f64::from(cx) + 0.5, f64::from(cy) + 0.5, f64::from(cz) + 0.5])
-                                {
+                                if let Some((sx, sy, _)) = project([
+                                    f64::from(cx) + 0.5,
+                                    f64::from(cy) + 0.5,
+                                    f64::from(cz) + 0.5,
+                                ]) {
                                     batch.fill(
                                         atlas,
                                         sx - 4.0,
@@ -2645,19 +2726,32 @@ macro_rules! impl_raven_game {
                     }
                 }
 
-                // 4. Keystrokes Widget
                 if keystrokes {
                     let kx = 6.0;
                     let ky = 72.0;
                     let stick = self.touch_move().unwrap_or([0.0, 0.0]);
-                    let w_on = stick[1] > 0.2 || self.physical_keys.contains(&KeyCode::KeyW);
-                    let s_on = stick[1] < -0.2 || self.physical_keys.contains(&KeyCode::KeyS);
-                    let a_on = stick[0] > 0.2 || self.physical_keys.contains(&KeyCode::KeyA);
-                    let d_on = stick[0] < -0.2 || self.physical_keys.contains(&KeyCode::KeyD);
+                    let w_on = stick[1] > 0.2
+                        || self.keys.held(Mapping::Forward)
+                        || self.physical_keys.contains(&KeyCode::KeyW);
+                    let s_on = stick[1] < -0.2
+                        || self.keys.held(Mapping::Back)
+                        || self.physical_keys.contains(&KeyCode::KeyS);
+                    let a_on = stick[0] > 0.2
+                        || self.keys.held(Mapping::Left)
+                        || self.physical_keys.contains(&KeyCode::KeyA);
+                    let d_on = stick[0] < -0.2
+                        || self.keys.held(Mapping::Right)
+                        || self.physical_keys.contains(&KeyCode::KeyD);
                     let lmb_on = self.left || self.touch.holding.is_some();
                     let rmb_on = self.right;
 
-                    let key_box = |batch: &mut HudBatch, x: f32, y: f32, w: f32, h: f32, lbl: &str, active: bool| {
+                    let key_box = |batch: &mut HudBatch,
+                                   x: f32,
+                                   y: f32,
+                                   w: f32,
+                                   h: f32,
+                                   lbl: &str,
+                                   active: bool| {
                         let bg = if active {
                             rgba(168, 85, 247, 210)
                         } else {
@@ -2683,7 +2777,6 @@ macro_rules! impl_raven_game {
                     key_box(batch, kx + 27.0, ky + 36.0, 25.0, 14.0, "RMB", rmb_on);
                 }
 
-                // 5. Saturation HUD & BridgeInfo Counter
                 if saturation_hud {
                     if let Some(p) = self.player.as_ref() {
                         batch.text(
@@ -2707,7 +2800,6 @@ macro_rules! impl_raven_game {
                     );
                 }
 
-                // 6. Draw Raven bS+ Floating Button & ClickGUI on top of everything
                 $crate::raven_bs::draw_hud_and_clickgui(batch, atlas);
             }
         }
