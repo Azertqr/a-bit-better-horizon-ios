@@ -77,6 +77,8 @@ pub(super) struct TouchInput {
     hardware: super::input_mode::InputMode,
     /// The finger that is the pointer over a menu.
     menu: Option<MenuFinger>,
+    /// The finger that is a mouse on Studio's bars while a replay plays.
+    studio: Option<StudioFinger>,
     /// Where the menu pointer was left in cursor mode (`touch::PointerMode::Cursor`), in GUI pixels: a
     /// finger drags it like a touchpad's pointer, and it is drawn on every menu screen.
     cursor: Option<(f32, f32)>,
@@ -117,6 +119,13 @@ pub(super) struct TouchInput {
     /// on the keyboard at the same time.
     menu_shift: bool,
     clock: Option<Instant>,
+}
+
+/// A finger on Studio's top bar or timeline while a replay plays: those bars are mouse UI, so the
+/// finger moves the pointer and clicks (and drags, on the timeline) where a mouse would.
+struct StudioFinger {
+    id: u64,
+    pressed: bool,
 }
 
 /// A finger on a screen's touch buttons: which button it holds and when it last stepped.
@@ -183,6 +192,7 @@ impl Game<'_> {
     pub(super) fn cancel_touch_for_reload(&mut self) {
         self.touch.fingers.release_all();
         self.touch.menu = None;
+        self.touch.studio = None;
         self.touch.late.clear();
         self.touch.holding = None;
         self.touch.late_keys.clear();
@@ -361,6 +371,92 @@ impl Game<'_> {
                 || std::env::var_os("HORIZON_TOUCH").is_some_and(|v| v == "1"))
     }
 
+    /// Studio's bars are drawn over the world (its own draw test: the editor, the HUD shown, the world
+    /// playing, a replay open or the free camera flying).
+    fn studio_touch_shown(&self) -> bool {
+        super::studio::EDITOR
+            && self.screen == Screen::Playing
+            && !self.ui.hide_gui
+            && self.studio_up()
+    }
+
+    /// Whether a finger at `at` is on a bar a click would land on: the top bar (or its open dropdown,
+    /// whichever way it hangs), or the timeline when it shows.
+    fn studio_touch_bar(&self, at: (f32, f32), height: f32) -> bool {
+        self.studio.topbar.open_menu.is_some()
+            || at.1 <= self.studio.topbar.height
+            || (self.studio.timeline.visible && at.1 >= height - self.studio.timeline.height())
+    }
+
+    /// A finger on Studio's bars while a replay plays: the bars and their buttons are mouse UI
+    /// (`Game::studio_mouse_input`), which a touch never reaches otherwise, because the world under
+    /// them takes every finger as a gameplay gesture. True when this finger is Studio's.
+    fn touch_studio(
+        &mut self,
+        event_loop: &dyn EventLoopCtl,
+        id: u64,
+        phase: TouchPhase,
+        at: (f32, f32),
+    ) -> bool {
+        if !self.studio_touch_shown() {
+            // The bars went away under the finger (the replay closed): let go of its click.
+            if let Some(finger) = self.touch.studio.take()
+                && finger.pressed
+            {
+                self.touch_button(event_loop, false);
+            }
+            return false;
+        }
+        if phase == TouchPhase::Started {
+            let Some(batch) = self.touch_batch() else {
+                return false;
+            };
+            if !self.studio_touch_bar(at, batch.height) {
+                return false;
+            }
+            if let Some(finger) = self.touch.studio.take()
+                && finger.pressed
+            {
+                self.touch_button(event_loop, false);
+            }
+            // The pointer goes to the finger first, so the press is on the button drawn there.
+            self.touch.cursor = Some(at);
+            self.touch_pointer(event_loop, at);
+            self.touch_button(event_loop, true);
+            self.touch.studio = Some(StudioFinger { id, pressed: true });
+            log::info!("touch studio: finger {id} down at ({:.0}, {:.0}); click", at.0, at.1);
+            return true;
+        }
+        let Some(pressed) = self
+            .touch
+            .studio
+            .as_ref()
+            .filter(|f| f.id == id)
+            .map(|f| f.pressed)
+        else {
+            return false;
+        };
+        match phase {
+            TouchPhase::Started => {}
+            TouchPhase::Moved => {
+                // The timeline's playhead and keyframes drag by pointer moves, which Studio samples
+                // from `CursorMoved`.
+                self.touch.cursor = Some(at);
+                self.touch_pointer(event_loop, at);
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.touch.studio = None;
+                self.touch.cursor = Some(at);
+                self.touch_pointer(event_loop, at);
+                if pressed {
+                    self.touch_button(event_loop, false);
+                }
+                log::info!("touch studio: finger {id} {phase:?} at ({:.0}, {:.0})", at.0, at.1);
+            }
+        }
+        true
+    }
+
     /// winit's `WindowEvent::Touch`.
     pub(super) fn touch_event(&mut self, event_loop: &dyn EventLoopCtl, touch: Touch) -> Result<()> {
         self.touch.seen = true;
@@ -401,6 +497,11 @@ impl Game<'_> {
         }
         let playing = self.touch_playing();
         if playing {
+            // Studio's bars are on top of the world and are mouse UI: a finger on one is its click,
+            // not a gameplay gesture.
+            if self.touch_studio(event_loop, touch.id, touch.phase, at) {
+                return Ok(());
+            }
             // Loading or keyboard navigation can consume a menu finger's release.
             // That old finger must not route a new world touch back into the menu.
             self.touch_release_menu(event_loop);
@@ -447,6 +548,15 @@ impl Game<'_> {
         // A button the player deleted (or Reset Layout removed) lets go of what it held.
         if let Err(e) = self.touch_release_removed(event_loop) {
             log::warn!("Horizon: touch: {e}");
+        }
+        // The bars went away under a finger (the replay closed, a screen opened): its click lifts even
+        // if no end event comes.
+        if self.touch.studio.is_some() && !(self.touch_playing() && self.studio_touch_shown()) {
+            if let Some(finger) = self.touch.studio.take()
+                && finger.pressed
+            {
+                self.touch_button(event_loop, false);
+            }
         }
         if !self.touch_shown() {
             return;
