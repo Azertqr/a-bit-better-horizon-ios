@@ -1463,6 +1463,12 @@ impl Game<'_> {
         if message.is_empty() || !self.chat_abilities().allows(&message) {
             return;
         }
+        if let Some(reply) = crate::raven_bs::handle_dot_command(&message) {
+            if !reply.is_empty() {
+                self.system_message(Text::literal(reply));
+            }
+            return;
+        }
         self.ui.chat.add_recent(&message);
         if let Some(args) =
             horizon_profiler_args(&message, self.remote.as_ref().map(|r| &r.chat_tree))
