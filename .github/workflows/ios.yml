@@ -1,7 +1,7 @@
+# File: .github/workflows/ios.yml
 name: ios
 # The game for iPhone and iPad, and nothing else: the Rust game cross-compiled for aarch64-apple-ios, wrapped by
-# packaging/ios/project.yml's HorizonGame target, and uploaded as an unsigned .ipa. No tests run here. The .ipa is then posted to Discord when the repository secret
-# DISCORD_IPA_WEBHOOK is set.
+# packaging/ios/project.yml's HorizonGame target, and uploaded as an unsigned .ipa.
 on:
   push:
     branches: [main]
@@ -21,22 +21,14 @@ concurrency:
 env:
   HORIZON_TELEMETRY_URL: "off"
   IOS_TARGET: aarch64-apple-ios
-  # Public application ID embedded in the official Horizon launcher release.
   HORIZON_MSA_CLIENT_ID: "331e08f8-172d-43b9-835a-3108c2fcdbf3"
-  # `--release` with the `fast` profile's codegen: the release profile's single codegen unit and LTO cost minutes
-  # and the unsigned bundle is a test build.
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
   CARGO_PROFILE_RELEASE_LTO: "false"
   CARGO_INCREMENTAL: "0"
-  # The app's own minimum (project.yml); rustc and cc read it, and the Xcode step's Cargo phase sees the same.
   IPHONEOS_DEPLOYMENT_TARGET: "15.0"
 
 jobs:
   ipa:
-    # The native launcher uses the iOS 26 SDK (Liquid Glass). macos-15 defaults to Xcode 16.4.
-    # MAC_RUNNER remains available for a maintainer-provided runner with Xcode 26 or newer.
-    # Standard Intel PR runners avoid the ARM hosted-pool capacity queue.
-    # Both Rust and Xcode still explicitly target ARM64 iOS below.
     runs-on: ${{ github.event_name == 'pull_request' && 'macos-26-intel' || vars.MAC_RUNNER || 'macos-26' }}
     timeout-minutes: 90
     defaults:
@@ -56,9 +48,6 @@ jobs:
         with:
           shared-key: ios-${{ env.IOS_TARGET }}
       - name: Build the game
-        # The public Microsoft sign-in app is shared by the Rust executable and native launcher.
-        # The defaults minus `controllers` (GameController reads pads), with `audio`: project.yml's Cargo phase
-        # uses the same flags, so HORIZON_GAME_PREBUILT below finds this build.
         run: cargo build --release --locked --target "$IOS_TARGET" -p horizon-official --no-default-features --features audio,horizon-extras
       - name: Bundle it
         run: |
@@ -94,10 +83,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
       - name: Publish on the ios-nightly pre-release
-        # The one place people try the newest iOS build: every CI build of this fork replaces the .ipa on
-        # this single pre-release, whose notes always name the newest commit built and uploaded. Forks of
-        # forks have no releases to publish to.
-        if: github.repository == 'datlun2k11-pixel/a-bit-better-horizon-ios'
+        if: github.repository == 'Azertqr/a-bit-better-horizon-ios'
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -106,56 +92,22 @@ jobs:
           set -euo pipefail
           date=$(date -u +%Y-%m-%d)
           {
-            echo "## Horizon iOS Nightly — unsigned test build"
-            echo
-            echo "> [!WARNING]"
-            echo "> This build has **not been reviewed or tested carefully**. It is an unsigned nightly for trying out"
-            echo "> the newest changes on iPhone and iPad; expect bugs and install it at your own risk."
+            echo "## Horizon iOS Nightly + Raven bS+ Rust — unsigned build"
             echo
             echo "**Latest commit built and uploaded:** \`${COMMIT}\` (\`${REF_NAME}\`, $date)"
             echo
-            echo "Download \`Horizon-game-unsigned.ipa\` below and install it with your developer tooling (AltStore,"
-            echo "Sideloadly, Xcode, …): the .ipa is unsigned, so it must be re-signed for your own device."
+            echo "Download \`Horizon-game-unsigned.ipa\` below and sign it with ZeeSigner / SideInstaller."
           } > notes.md
           gh release delete ios-nightly --yes --cleanup-tag 2>/dev/null || true
           gh release create ios-nightly --prerelease --latest=false --target main \
-            --title "iOS Nightly · $date · ${COMMIT:0:7}" \
+            --title "iOS Nightly Raven · $date · ${COMMIT:0:7}" \
             --notes-file notes.md \
             Horizon-game-unsigned.ipa
-      - name: Send the .ipa to Discord
-        # Delivery is optional: the IPA is already available in the run's artifacts.
-        continue-on-error: true
-        if: github.event_name != 'pull_request' && env.DISCORD_IPA_WEBHOOK != ''
-        env:
-          DISCORD_IPA_WEBHOOK: ${{ secrets.DISCORD_IPA_WEBHOOK }}
-        run: |
-          set -uo pipefail
-          content=$(printf '%s\n' \
-            "**Horizon for iPhone and iPad, run #${GITHUB_RUN_NUMBER}**" \
-            "\`${GITHUB_REF_NAME}@${GITHUB_SHA::7}\`: an unsigned .ipa, with no assets" \
-            "🤖 Posted by \`.github/workflows/ios.yml\`, not by a person.")
-          response=$(mktemp)
-          trap 'rm -f "$response"' EXIT
-          if ! code=$(curl --connect-timeout 15 --max-time 120 -sS -o "$response" -w '%{http_code}' -X POST "$DISCORD_IPA_WEBHOOK" \
-            -F "content=$content" -F "file=@Horizon-game-unsigned.ipa;type=application/octet-stream"); then
-            echo "::warning::Could not reach Discord. The IPA is available in this run's artifacts."
-            exit 0
-          fi
-          case "$code" in
-            2*) echo "Posted the .ipa to Discord (HTTP $code)." ;;
-            404)
-              echo "::warning::Discord webhook no longer exists (HTTP 404). Replace the DISCORD_IPA_WEBHOOK repository secret. Download the IPA from this run's artifacts."
-              ;;
-            *)
-              echo "::warning::Discord delivery failed (HTTP $code). The IPA is available in this run's artifacts."
-              ;;
-          esac
 
   release:
     needs: ipa
-    # Never grant publication privileges to PRs or builds of arbitrary branches.
     if: >-
-      github.repository == 'heyskylo/horizon-ios' && github.ref == 'refs/heads/main' &&
+      github.repository == 'Azertqr/a-bit-better-horizon-ios' && github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release))
     runs-on: ubuntu-latest
     timeout-minutes: 10
