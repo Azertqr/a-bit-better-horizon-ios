@@ -83,7 +83,6 @@ jobs:
           retention-days: 7
           if-no-files-found: error
       - name: Publish on the ios-nightly pre-release
-        if: github.repository == 'Azertqr/a-bit-better-horizon-ios'
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -92,14 +91,14 @@ jobs:
           set -euo pipefail
           date=$(date -u +%Y-%m-%d)
           {
-            echo "## Horizon iOS Nightly + Raven bS+ Rust — unsigned build"
+            echo "## Horizon iOS + Raven bS+ ClickGUI — direct unsigned .ipa"
             echo
-            echo "**Latest commit built and uploaded:** \`${COMMIT}\` (\`${REF_NAME}\`, $date)"
+            echo "**Commit:** \`${COMMIT}\` (\`${REF_NAME}\`, $date)"
             echo
-            echo "Download \`Horizon-game-unsigned.ipa\` below and sign it with ZeeSigner / SideInstaller."
+            echo "Télécharge directement \`Horizon-game-unsigned.ipa\` ci-dessous (pas de .zip) et signe-le avec ZeeSigner."
           } > notes.md
           gh release delete ios-nightly --yes --cleanup-tag 2>/dev/null || true
-          gh release create ios-nightly --prerelease --latest=false --target main \
+          gh release create ios-nightly --prerelease --latest=false --target "${GITHUB_REF_NAME}" \
             --title "iOS Nightly Raven · $date · ${COMMIT:0:7}" \
             --notes-file notes.md \
             Horizon-game-unsigned.ipa
