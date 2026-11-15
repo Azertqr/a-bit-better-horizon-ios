@@ -30,24 +30,6 @@ pub fn main_with(mods: crate::mod_api::Mods) {
         log::warn!("Trait mods already installed; ignoring the second list");
     }
     horizon_threads::configure_allocator();
-    // Initialize Raven bS+ global state on boot with Combat/Movement/Render defaults ready
-    if let Ok(mut raven) = crate::raven_bs::global_raven().lock() {
-        raven.cfg.reach_enabled = true;
-        raven.cfg.reach_max = 4.2;
-        raven.cfg.fly_enabled = true;
-        raven.cfg.delay_remover_enabled = true;
-        raven.cfg.velocity_enabled = true;
-        raven.cfg.velocity_horizontal = 0.0;
-        raven.cfg.velocity_vertical = 100.0;
-        raven.cfg.sprint_enabled = true;
-        raven.cfg.keep_sprint_enabled = true;
-        raven.cfg.nofall_enabled = true;
-        raven.cfg.fast_place_enabled = true;
-        raven.cfg.hud_enabled = true;
-        raven.cfg.keystrokes_enabled = true;
-        raven.cfg.player_esp_enabled = true;
-        raven.cfg.fullbright_enabled = true;
-    }
     horizon_airplay::register();
     horizon_airplay::audio::start();
     #[cfg(target_os = "ios")]
