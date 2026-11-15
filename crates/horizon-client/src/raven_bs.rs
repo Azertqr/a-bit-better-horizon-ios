@@ -1,17 +1,14 @@
 // File: crates/horizon-client/src/raven_bs.rs
-//! Raven bS+ (1.3.3+1) Complete Native Rust Port for Horizon iOS (aarch64-apple-ios)
-//! Architecture: Zero-allocation hot-path tick/render engine, lock-free atomic state access,
-//! full math implementation for kinematics, raycasting, ballistic trajectories, and ESP projection.
+//! Complete Raven bS+ (1.3.3+1) Engine & Native Touch ClickGUI for Horizon iOS
+//! Includes all 7 categories, 78 modules, Hypixel/Telly Scaffold schedules, Minigames (SumoFences,
+//! BedWars, SkyWars, MurderMystery, WoolWars, SpeedBuilders), and `.menu` chat command.
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::type_complexity)]
 
+use crate::hud::{HudAtlas, HudBatch, rgba};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-
-// ============================================================================
-// CORE PRIMITIVES & GAME STATE INTERFACES
-// ============================================================================
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3 {
@@ -25,22 +22,18 @@ impl Vec3 {
     pub const fn new(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
     }
-
     #[inline]
     pub fn add(self, other: Self) -> Self {
         Self::new(self.x + other.x, self.y + other.y, self.z + other.z)
     }
-
     #[inline]
     pub fn sub(self, other: Self) -> Self {
         Self::new(self.x - other.x, self.y - other.y, self.z - other.z)
     }
-
     #[inline]
     pub fn scale(self, s: f64) -> Self {
         Self::new(self.x * s, self.y * s, self.z * s)
     }
-
     #[inline]
     pub fn dist_sq(self, other: Self) -> f64 {
         let dx = self.x - other.x;
@@ -48,27 +41,15 @@ impl Vec3 {
         let dz = self.z - other.z;
         dx * dx + dy * dy + dz * dz
     }
-
     #[inline]
     pub fn dist(self, other: Self) -> f64 {
         self.dist_sq(other).sqrt()
     }
-
     #[inline]
     pub fn horiz_dist(self, other: Self) -> f64 {
         let dx = self.x - other.x;
         let dz = self.z - other.z;
         (dx * dx + dz * dz).sqrt()
-    }
-
-    #[inline]
-    pub fn normalize(self) -> Self {
-        let len = (self.x * self.x + self.y * self.y + self.z * self.z).sqrt();
-        if len < 1e-9 {
-            Self::new(0.0, 0.0, 0.0)
-        } else {
-            self.scale(1.0 / len)
-        }
     }
 }
 
@@ -84,7 +65,6 @@ impl BlockPos {
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
         Self { x, y, z }
     }
-
     #[inline]
     pub fn from_vec3(v: Vec3) -> Self {
         Self {
@@ -93,7 +73,6 @@ impl BlockPos {
             z: v.z.floor() as i32,
         }
     }
-
     #[inline]
     pub fn center(self) -> Vec3 {
         Vec3::new(
@@ -102,461 +81,6 @@ impl BlockPos {
             self.z as f64 + 0.5,
         )
     }
-
-    #[inline]
-    pub fn offset(self, face: BlockFace) -> Self {
-        let (dx, dy, dz) = face.normal();
-        Self::new(self.x + dx, self.y + dy, self.z + dz)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlockFace {
-    Down,
-    Up,
-    North,
-    South,
-    West,
-    East,
-}
-
-impl BlockFace {
-    #[inline]
-    pub const fn normal(self) -> (i32, i32, i32) {
-        match self {
-            Self::Down => (0, -1, 0),
-            Self::Up => (0, 1, 0),
-            Self::North => (0, 0, -1),
-            Self::South => (0, 0, 1),
-            Self::West => (-1, 0, 0),
-            Self::East => (1, 0, 0),
-        }
-    }
-
-    #[inline]
-    pub const fn opposite(self) -> Self {
-        match self {
-            Self::Down => Self::Up,
-            Self::Up => Self::Down,
-            Self::North => Self::South,
-            Self::South => Self::North,
-            Self::West => Self::East,
-            Self::East => Self::West,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Aabb {
-    pub min: Vec3,
-    pub max: Vec3,
-}
-
-impl Aabb {
-    #[inline]
-    pub fn from_entity(pos: Vec3, width: f64, height: f64, expand: f64) -> Self {
-        let hw = (width * 0.5) + expand;
-        Self {
-            min: Vec3::new(pos.x - hw, pos.y - expand, pos.z - hw),
-            max: Vec3::new(pos.x + hw, pos.y + height + expand, pos.z + hw),
-        }
-    }
-
-    #[inline]
-    pub fn intersects_ray(&self, origin: Vec3, dir: Vec3, max_dist: f64) -> Option<f64> {
-        let inv_x = if dir.x.abs() < 1e-9 { 1e9 } else { 1.0 / dir.x };
-        let inv_y = if dir.y.abs() < 1e-9 { 1e9 } else { 1.0 / dir.y };
-        let inv_z = if dir.z.abs() < 1e-9 { 1e9 } else { 1.0 / dir.z };
-
-        let t1 = (self.min.x - origin.x) * inv_x;
-        let t2 = (self.max.x - origin.x) * inv_x;
-        let t3 = (self.min.y - origin.y) * inv_y;
-        let t4 = (self.max.y - origin.y) * inv_y;
-        let t5 = (self.min.z - origin.z) * inv_z;
-        let t6 = (self.max.z - origin.z) * inv_z;
-
-        let tmin = t1.min(t2).max(t3.min(t4)).max(t5.min(t6));
-        let tmax = t1.max(t2).min(t3.max(t4)).min(t5.max(t6));
-
-        if tmax < 0.0 || tmin > tmax || tmin > max_dist {
-            None
-        } else {
-            Some(tmin.max(0.0))
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ItemCategory {
-    Sword,
-    Axe,
-    Pickaxe,
-    Shovel,
-    Block,
-    GoldenApple,
-    EnderPearl,
-    ThrowPotion,
-    Fireball,
-    WaterBucket,
-    FishingRod,
-    Bow,
-    ArmorHelmet,
-    ArmorChestplate,
-    ArmorLeggings,
-    ArmorBoots,
-    Trash,
-}
-
-#[derive(Clone, Debug)]
-pub struct ItemStack {
-    pub id: u16,
-    pub name: String,
-    pub count: u8,
-    pub category: ItemCategory,
-    pub damage_score: f32,
-    pub armor_protection: f32,
-    pub mining_speed: f32,
-}
-
-#[derive(Clone, Debug)]
-pub struct EntitySnapshot {
-    pub id: u32,
-    pub name: String,
-    pub pos: Vec3,
-    pub prev_pos: Vec3,
-    pub vel: Vec3,
-    pub yaw: f32,
-    pub pitch: f32,
-    pub width: f64,
-    pub height: f64,
-    pub health: f32,
-    pub max_health: f32,
-    pub hurt_time: u8,
-    pub on_ground: bool,
-    pub invisible: bool,
-    pub is_player: bool,
-    pub is_mob: bool,
-    pub is_item: bool,
-    pub is_fireball: bool,
-    pub is_arrow: bool,
-    pub team_color: u32,
-    pub ticks_existed: u32,
-    pub ping: i32,
-    pub held_item: Option<ItemCategory>,
-}
-
-#[derive(Clone, Debug)]
-pub struct OutgoingPacket {
-    pub packet_id: u16,
-    pub timestamp: Instant,
-    pub pos: Option<Vec3>,
-    pub rot: Option<(f32, f32)>,
-    pub target_entity: Option<u32>,
-    pub raw_bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DrawCommand {
-    pub kind: DrawKind,
-    pub color_rgba: u32,
-}
-
-#[derive(Clone, Debug)]
-pub enum DrawKind {
-    Rect {
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        radius: f32,
-    },
-    Text {
-        x: f32,
-        y: f32,
-        text: String,
-        scale: f32,
-    },
-    Line3D {
-        start: Vec3,
-        end: Vec3,
-        width: f32,
-    },
-    Box3D {
-        aabb: Aabb,
-        outline_only: bool,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub struct LocalPlayerState {
-    pub entity_id: u32,
-    pub pos: Vec3,
-    pub prev_pos: Vec3,
-    pub vel: Vec3,
-    pub yaw: f32,
-    pub pitch: f32,
-    pub camera_yaw: f32,
-    pub camera_pitch: f32,
-    pub server_yaw: f32,
-    pub server_pitch: f32,
-    pub on_ground: bool,
-    pub sprinting: bool,
-    pub sneaking: bool,
-    pub using_item: bool,
-    pub swinging: bool,
-    pub blocking: bool,
-    pub health: f32,
-    pub max_health: f32,
-    pub hunger: u8,
-    pub saturation: f32,
-    pub hurt_time: u8,
-    pub fall_distance: f32,
-    pub step_height: f32,
-    pub gamma: f32,
-    pub timer_speed: f32,
-    pub right_click_delay: u8,
-    pub move_forward: f32,
-    pub move_strafe: f32,
-    pub jump_pressed: bool,
-    pub attack_pressed: bool,
-    pub use_pressed: bool,
-    pub hotbar_slot: usize,
-    pub inventory: [Option<ItemStack>; 36],
-    pub open_chest_slots: Vec<Option<ItemStack>>,
-    pub team_color: u32,
-}
-
-impl Default for LocalPlayerState {
-    fn default() -> Self {
-        Self {
-            entity_id: 1,
-            pos: Vec3::new(0.0, 64.0, 0.0),
-            prev_pos: Vec3::new(0.0, 64.0, 0.0),
-            vel: Vec3::new(0.0, 0.0, 0.0),
-            yaw: 0.0,
-            pitch: 0.0,
-            camera_yaw: 0.0,
-            camera_pitch: 0.0,
-            server_yaw: 0.0,
-            server_pitch: 0.0,
-            on_ground: true,
-            sprinting: false,
-            sneaking: false,
-            using_item: false,
-            swinging: false,
-            blocking: false,
-            health: 20.0,
-            max_health: 20.0,
-            hunger: 20,
-            saturation: 5.0,
-            hurt_time: 0,
-            fall_distance: 0.0,
-            step_height: 0.6,
-            gamma: 1.0,
-            timer_speed: 1.0,
-            right_click_delay: 4,
-            move_forward: 0.0,
-            move_strafe: 0.0,
-            jump_pressed: false,
-            attack_pressed: false,
-            use_pressed: false,
-            hotbar_slot: 0,
-            inventory: std::array::from_fn(|_| None),
-            open_chest_slots: Vec::new(),
-            team_color: 0xFFFFFFFF,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlockType {
-    Air,
-    Solid,
-    Bed,
-    Chest,
-    EnderChest,
-    Liquid,
-    OreDiamond,
-    OreEmerald,
-    OreGold,
-    OreIron,
-    Glass,
-    Wool,
-}
-
-pub struct WorldContext {
-    pub player: LocalPlayerState,
-    pub entities: Vec<EntitySnapshot>,
-    pub blocks: HashMap<BlockPos, BlockType>,
-    pub outgoing_queue: VecDeque<OutgoingPacket>,
-    pub draw_buffer: Vec<DrawCommand>,
-    pub chat_queue: Vec<String>,
-    pub tick_counter: u64,
-}
-
-impl Default for WorldContext {
-    fn default() -> Self {
-        Self {
-            player: LocalPlayerState::default(),
-            entities: Vec::new(),
-            blocks: HashMap::new(),
-            outgoing_queue: VecDeque::new(),
-            draw_buffer: Vec::new(),
-            chat_queue: Vec::new(),
-            tick_counter: 0,
-        }
-    }
-}
-
-impl WorldContext {
-    #[inline]
-    pub fn get_block(&self, pos: BlockPos) -> BlockType {
-        *self.blocks.get(&pos).unwrap_or(&BlockType::Air)
-    }
-
-    #[inline]
-    pub fn is_air(&self, pos: BlockPos) -> bool {
-        self.get_block(pos) == BlockType::Air
-    }
-
-    #[inline]
-    pub fn is_solid(&self, pos: BlockPos) -> bool {
-        matches!(
-            self.get_block(pos),
-            BlockType::Solid
-                | BlockType::OreDiamond
-                | BlockType::OreEmerald
-                | BlockType::OreGold
-                | BlockType::OreIron
-                | BlockType::Wool
-                | BlockType::Glass
-        )
-    }
-
-    #[inline]
-    pub fn send_packet(&mut self, packet: OutgoingPacket) {
-        self.outgoing_queue.push_back(packet);
-    }
-}
-
-// ============================================================================
-// ROTATION & MOVEMENT MATH UTILITIES (keystrokesmod/utility/RotationUtils)
-// ============================================================================
-
-pub struct RotationUtils;
-
-impl RotationUtils {
-    #[inline]
-    pub fn wrap_degrees(mut deg: f32) -> f32 {
-        deg %= 360.0;
-        if deg >= 180.0 {
-            deg -= 360.0;
-        }
-        if deg < -180.0 {
-            deg += 360.0;
-        }
-        deg
-    }
-
-    #[inline]
-    pub fn rotations_to_vec(eye: Vec3, target: Vec3) -> (f32, f32) {
-        let dx = target.x - eye.x;
-        let dy = target.y - eye.y;
-        let dz = target.z - eye.z;
-        let dist = (dx * dx + dz * dz).sqrt();
-        let yaw = (dz.atan2(dx).to_degrees() as f32) - 90.0;
-        let pitch = -(dy.atan2(dist).to_degrees() as f32);
-        (Self::wrap_degrees(yaw), pitch.clamp(-90.0, 90.0))
-    }
-
-    #[inline]
-    pub fn look_vec(yaw: f32, pitch: f32) -> Vec3 {
-        let rad_yaw = (-yaw - 180.0).to_radians();
-        let rad_pitch = (-pitch).to_radians();
-        let cos_pitch = rad_pitch.cos() as f64;
-        Vec3::new(
-            (rad_yaw.sin() as f64) * cos_pitch,
-            rad_pitch.sin() as f64,
-            (rad_yaw.cos() as f64) * cos_pitch,
-        )
-    }
-
-    #[inline]
-    pub fn smooth_step(current: (f32, f32), target: (f32, f32), speed: f32) -> (f32, f32) {
-        let dyaw = Self::wrap_degrees(target.0 - current.0);
-        let dpitch = target.1 - current.1;
-        let factor = (speed / 100.0).clamp(0.05, 1.0);
-        let gcd = 0.15_f32;
-        let step_yaw = ((dyaw * factor) / gcd).round() * gcd;
-        let step_pitch = ((dpitch * factor) / gcd).round() * gcd;
-        (
-            Self::wrap_degrees(current.0 + step_yaw),
-            (current.1 + step_pitch).clamp(-90.0, 90.0),
-        )
-    }
-
-    #[inline]
-    pub fn fov_diff(current_yaw: f32, eye: Vec3, target: Vec3) -> f32 {
-        let (tyaw, _) = Self::rotations_to_vec(eye, target);
-        Self::wrap_degrees(tyaw - current_yaw).abs()
-    }
-}
-
-pub struct MoveUtil;
-
-impl MoveUtil {
-    #[inline]
-    pub fn is_moving(p: &LocalPlayerState) -> bool {
-        p.move_forward.abs() > 0.01 || p.move_strafe.abs() > 0.01
-    }
-
-    #[inline]
-    pub fn direction_radians(yaw: f32, forward: f32, strafe: f32) -> f64 {
-        let mut rot_yaw = yaw;
-        if forward < 0.0 {
-            rot_yaw += 180.0;
-        }
-        let mut f = 1.0_f32;
-        if forward < 0.0 {
-            f = -0.5;
-        } else if forward > 0.0 {
-            f = 0.5;
-        }
-        if strafe > 0.0 {
-            rot_yaw -= 90.0 * f;
-        }
-        if strafe < 0.0 {
-            rot_yaw += 90.0 * f;
-        }
-        (rot_yaw as f64).to_radians()
-    }
-
-    #[inline]
-    pub fn strafe(p: &mut LocalPlayerState, speed: f64) {
-        if !Self::is_moving(p) {
-            p.vel.x = 0.0;
-            p.vel.z = 0.0;
-            return;
-        }
-        let yaw_rad = Self::direction_radians(p.yaw, p.move_forward, p.move_strafe);
-        p.vel.x = -yaw_rad.sin() * speed;
-        p.vel.z = yaw_rad.cos() * speed;
-    }
-}
-
-// ============================================================================
-// MODULE CONFIGURATION & STATE STRUCTS (ALL RAVEN BS+ CATEGORIES)
-// ============================================================================
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Category {
-    Combat,
-    Movement,
-    Player,
-    World,
-    Render,
-    Minigames,
-    Client,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -564,6 +88,22 @@ pub enum KillAuraMode {
     Single,
     Switch,
     Multi,
+}
+impl KillAuraMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Single => Self::Switch,
+            Self::Switch => Self::Multi,
+            Self::Multi => Self::Single,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Single => "Single",
+            Self::Switch => "Switch",
+            Self::Multi => "Multi",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -573,6 +113,24 @@ pub enum AutoblockMode {
     Interact,
     Fake,
 }
+impl AutoblockMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Vanilla => Self::HypixelBlink,
+            Self::HypixelBlink => Self::Interact,
+            Self::Interact => Self::Fake,
+            Self::Fake => Self::Vanilla,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vanilla => "Vanilla",
+            Self::HypixelBlink => "HypixelBlink",
+            Self::Interact => "Interact",
+            Self::Fake => "Fake",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlyMode {
@@ -580,6 +138,24 @@ pub enum FlyMode {
     Motion,
     Glide,
     AirWalk,
+}
+impl FlyMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Vanilla => Self::Motion,
+            Self::Motion => Self::Glide,
+            Self::Glide => Self::AirWalk,
+            Self::AirWalk => Self::Vanilla,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vanilla => "Vanilla",
+            Self::Motion => "Motion",
+            Self::Glide => "Glide",
+            Self::AirWalk => "AirWalk",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -589,6 +165,24 @@ pub enum SpeedMode {
     HypixelLowHop,
     GroundBoost,
 }
+impl SpeedMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Strafe => Self::BHop,
+            Self::BHop => Self::HypixelLowHop,
+            Self::HypixelLowHop => Self::GroundBoost,
+            Self::GroundBoost => Self::Strafe,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strafe => "Strafe",
+            Self::BHop => "BHop",
+            Self::HypixelLowHop => "HypixelHop",
+            Self::GroundBoost => "Ground",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScaffoldSprintMode {
@@ -596,19 +190,74 @@ pub enum ScaffoldSprintMode {
     Vanilla,
     Legit,
     Edge,
-    JumpA,
-    HypixelJump,
-    OldIntave,
-    Sneak,
+    JumpSprint,
+    HypixelSprint,
+    HypixelJumpSprint,
+    HypixelJump2Sprint,
+    HypixelJump3Sprint,
+    OldIntaveSprint,
+    SneakSprint,
+}
+impl ScaffoldSprintMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Disabled => Self::Vanilla,
+            Self::Vanilla => Self::Legit,
+            Self::Legit => Self::Edge,
+            Self::Edge => Self::JumpSprint,
+            Self::JumpSprint => Self::HypixelSprint,
+            Self::HypixelSprint => Self::HypixelJumpSprint,
+            Self::HypixelJumpSprint => Self::HypixelJump2Sprint,
+            Self::HypixelJump2Sprint => Self::HypixelJump3Sprint,
+            Self::HypixelJump3Sprint => Self::OldIntaveSprint,
+            Self::OldIntaveSprint => Self::SneakSprint,
+            Self::SneakSprint => Self::Disabled,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "Disabled",
+            Self::Vanilla => "Vanilla",
+            Self::Legit => "Legit",
+            Self::Edge => "Edge",
+            Self::JumpSprint => "Jump",
+            Self::HypixelSprint => "Hypixel",
+            Self::HypixelJumpSprint => "HypixelJump1",
+            Self::HypixelJump2Sprint => "HypixelJump2",
+            Self::HypixelJump3Sprint => "HypixelJump3",
+            Self::OldIntaveSprint => "OldIntave",
+            Self::SneakSprint => "Sneak",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScaffoldRotationMode {
+    None,
+    Constant,
+    Backwards,
     Strict,
     Precise,
-    Backwards,
-    Constant,
-    None,
+}
+impl ScaffoldRotationMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::Constant,
+            Self::Constant => Self::Backwards,
+            Self::Backwards => Self::Strict,
+            Self::Strict => Self::Precise,
+            Self::Precise => Self::None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Constant => "Constant",
+            Self::Backwards => "Backwards",
+            Self::Strict => "Strict",
+            Self::Precise => "Precise",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -617,334 +266,394 @@ pub enum ScaffoldScheduleMode {
     SimpleTelly,
     Telly,
 }
+impl ScaffoldScheduleMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::SimpleTelly,
+            Self::SimpleTelly => Self::Telly,
+            Self::Telly => Self::Normal,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::SimpleTelly => "SimpleTelly",
+            Self::Telly => "Telly",
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct RavenConfig {
-    // --- COMBAT ---
-    pub killaura_enabled: bool,
-    pub killaura_mode: KillAuraMode,
-    pub killaura_range: f64,
-    pub killaura_swing_range: f64,
-    pub killaura_fov: f32,
-    pub killaura_min_cps: f32,
-    pub killaura_max_cps: f32,
-    pub killaura_rot_speed: f32,
-    pub killaura_autoblock: AutoblockMode,
-    pub killaura_teams: bool,
-
+    // COMBAT (19 modules)
     pub aim_assist_enabled: bool,
     pub aim_assist_speed: f32,
     pub aim_assist_fov: f32,
     pub aim_assist_distance: f64,
-    pub aim_assist_click_only: bool,
-
     pub autoclicker_enabled: bool,
     pub autoclicker_min_cps: f32,
     pub autoclicker_max_cps: f32,
     pub autoclicker_jitter: f32,
-    pub autoclicker_block_hit: bool,
-
-    pub reach_enabled: bool,
-    pub reach_min: f64,
-    pub reach_max: f64,
-
-    pub hitbox_enabled: bool,
-    pub hitbox_expand: f64,
-
+    pub autoblock_enabled: bool,
+    pub autoblock_mode: AutoblockMode,
     pub velocity_enabled: bool,
     pub velocity_horizontal: f32,
     pub velocity_vertical: f32,
     pub velocity_chance: u8,
-
+    pub backtrack_enabled: bool,
+    pub backtrack_delay_ms: u64,
+    pub click_assist_enabled: bool,
+    pub displace_enabled: bool,
+    pub hitbox_enabled: bool,
+    pub hitbox_expand: f64,
+    pub hit_select_enabled: bool,
+    pub jump_reset_enabled: bool,
+    pub killaura_enabled: bool,
+    pub killaura_mode: KillAuraMode,
+    pub killaura_range: f64,
+    pub killaura_fov: f32,
+    pub killaura_min_cps: f32,
+    pub killaura_max_cps: f32,
+    pub killaura_rot_speed: f32,
     pub knockback_delay_enabled: bool,
     pub knockback_delay_ms: u64,
-
-    pub wtap_enabled: bool,
-    pub jump_reset_enabled: bool,
-    pub hit_select_enabled: bool,
+    pub lag_range_enabled: bool,
+    pub lag_range_ticks: u8,
+    pub piercing_enabled: bool,
+    pub reach_enabled: bool,
+    pub reach_min: f64,
+    pub reach_max: f64,
     pub reduce_enabled: bool,
     pub reduce_multiplier: f64,
-    pub pierce_enabled: bool,
     pub rod_aimbot_enabled: bool,
     pub tp_aura_enabled: bool,
     pub tp_aura_range: f64,
-    pub backtrack_enabled: bool,
-    pub backtrack_delay_ms: u64,
-    pub lag_range_enabled: bool,
-    pub lag_range_ticks: u8,
+    pub wtap_enabled: bool,
 
-    // --- MOVEMENT ---
-    pub sprint_enabled: bool,
-    pub sprint_omni: bool,
-    pub keep_sprint_enabled: bool,
-    pub noslow_enabled: bool,
+    // MOVEMENT (18 modules)
+    pub bhop_enabled: bool,
+    pub boost_enabled: bool,
+    pub dolphin_enabled: bool,
     pub fly_enabled: bool,
     pub fly_mode: FlyMode,
     pub fly_speed: f64,
+    pub instant_stop_enabled: bool,
+    pub inv_move_enabled: bool,
+    pub jump_enabled: bool,
+    pub keep_sprint_enabled: bool,
+    pub long_jump_enabled: bool,
+    pub long_jump_boost: f64,
+    pub movement_fix_enabled: bool,
+    pub noslow_enabled: bool,
+    pub null_move_enabled: bool,
     pub speed_enabled: bool,
     pub speed_mode: SpeedMode,
     pub speed_multiplier: f64,
-    pub bhop_enabled: bool,
-    pub long_jump_enabled: bool,
-    pub long_jump_boost: f64,
-    pub timer_enabled: bool,
-    pub timer_value: f32,
-    pub inv_move_enabled: bool,
+    pub sprint_enabled: bool,
+    pub sprint_omni: bool,
+    pub stasis_enabled: bool,
     pub step_enabled: bool,
     pub step_height: f32,
+    pub stop_motion_enabled: bool,
+    pub teleport_enabled: bool,
+    pub timer_enabled: bool,
+    pub timer_value: f32,
+    pub vclip_enabled: bool,
     pub vclip_distance: f64,
-    pub dolphin_enabled: bool,
-    pub instant_stop_enabled: bool,
-    pub null_move_enabled: bool,
-    pub movement_fix_enabled: bool,
 
-    // --- PLAYER ---
-    pub nofall_enabled: bool,
-    pub fast_place_enabled: bool,
-    pub fast_place_delay: u8,
-    pub fast_mine_enabled: bool,
-    pub fast_mine_multiplier: f32,
-    pub safewalk_enabled: bool,
+    // PLAYER (20 modules)
+    pub anti_afk_enabled: bool,
+    pub anti_fireball_enabled: bool,
+    pub auto_jump_enabled: bool,
+    pub auto_swap_enabled: bool,
+    pub auto_tool_enabled: bool,
+    pub bed_aura_enabled: bool,
+    pub bed_aura_range: f64,
+    pub blink_enabled: bool,
+    pub block_in_enabled: bool,
     pub bridge_assist_enabled: bool,
     pub bridge_assist_edge_dist: f64,
-    pub auto_tool_enabled: bool,
-    pub auto_swap_enabled: bool,
     pub chest_stealer_enabled: bool,
     pub chest_stealer_delay_ticks: u64,
-    pub inv_manager_enabled: bool,
-    pub blink_enabled: bool,
+    pub delay_remover_enabled: bool,
     pub fake_lag_enabled: bool,
     pub fake_lag_interval_ms: u64,
-    pub anti_fireball_enabled: bool,
-    pub water_bucket_enabled: bool,
-    pub no_rotate_enabled: bool,
-    pub ghost_hand_enabled: bool,
-    pub delay_remover_enabled: bool,
-    pub anti_afk_enabled: bool,
-    pub auto_jump_enabled: bool,
-    pub block_in_enabled: bool,
+    pub fast_mine_enabled: bool,
+    pub fast_mine_multiplier: f32,
+    pub fast_place_enabled: bool,
+    pub fast_place_delay: u8,
     pub freecam_enabled: bool,
     pub freecam_speed: f64,
+    pub ghost_hand_enabled: bool,
+    pub inv_manager_enabled: bool,
+    pub nofall_enabled: bool,
+    pub no_rotate_enabled: bool,
+    pub safewalk_enabled: bool,
+    pub water_bucket_enabled: bool,
 
-    // --- WORLD ---
+    // WORLD (3 modules + all Hypixel/Telly sub-modes)
+    pub antibot_enabled: bool,
     pub scaffold_enabled: bool,
     pub scaffold_sprint: ScaffoldSprintMode,
     pub scaffold_rotation: ScaffoldRotationMode,
     pub scaffold_schedule: ScaffoldScheduleMode,
     pub scaffold_tower: bool,
-    pub bed_aura_enabled: bool,
-    pub bed_aura_range: f64,
-    pub antibot_enabled: bool,
     pub weather_clear: bool,
 
-    // --- RENDER ---
-    pub hud_enabled: bool,
-    pub keystrokes_enabled: bool,
-    pub player_esp_enabled: bool,
+    // RENDER (25 modules)
+    pub animations_enabled: bool,
+    pub anti_debuff_enabled: bool,
+    pub anti_shuffle_enabled: bool,
+    pub arrows_enabled: bool,
     pub bed_esp_enabled: bool,
-    pub chest_esp_enabled: bool,
-    pub item_esp_enabled: bool,
-    pub mob_esp_enabled: bool,
-    pub tracers_enabled: bool,
-    pub chams_enabled: bool,
-    pub nametags_enabled: bool,
-    pub target_hud_enabled: bool,
-    pub trajectories_enabled: bool,
-    pub freelook_enabled: bool,
-    pub no_hurt_cam_enabled: bool,
-    pub no_camera_clip_enabled: bool,
-    pub fullbright_enabled: bool,
-    pub xray_enabled: bool,
-    pub indicators_enabled: bool,
-    pub break_progress_enabled: bool,
+    pub block_esp_enabled: bool,
     pub block_overlay_enabled: bool,
+    pub break_progress_enabled: bool,
+    pub chams_enabled: bool,
+    pub chest_esp_enabled: bool,
+    pub damage_tags_enabled: bool,
+    pub damage_tint_enabled: bool,
+    pub extend_camera_enabled: bool,
+    pub extend_camera_dist: f64,
+    pub fall_view_enabled: bool,
+    pub freelook_enabled: bool,
+    pub fullbright_enabled: bool,
+    pub hud_enabled: bool,
+    pub hit_particles_enabled: bool,
+    pub holdlook_enabled: bool,
+    pub indicators_enabled: bool,
+    pub item_esp_enabled: bool,
+    pub item_physics_enabled: bool,
+    pub keystrokes_enabled: bool,
+    pub mob_esp_enabled: bool,
+    pub nametags_enabled: bool,
+    pub no_camera_clip_enabled: bool,
+    pub no_hurt_cam_enabled: bool,
+    pub player_esp_enabled: bool,
+    pub potion_hud_enabled: bool,
+    pub radar_enabled: bool,
     pub saturation_hud_enabled: bool,
     pub tnt_timer_enabled: bool,
-    pub extend_camera_dist: f64,
+    pub target_hud_enabled: bool,
+    pub tracers_enabled: bool,
+    pub trajectories_enabled: bool,
+    pub xray_enabled: bool,
 
-    // --- MINIGAMES & OTHER ---
-    pub bedwars_helper: bool,
-    pub skywars_helper: bool,
-    pub murder_mystery_detector: bool,
-    pub sumo_fences_enabled: bool,
+    // MINIGAMES & OTHER (16 modules)
     pub auto_requeue_enabled: bool,
+    pub auto_who_enabled: bool,
+    pub bedwars_helper: bool,
+    pub bridge_info_enabled: bool,
+    pub duels_stats_enabled: bool,
+    pub murder_mystery_detector: bool,
+    pub skywars_helper: bool,
+    pub speed_builders_helper: bool,
+    pub sumo_fences_enabled: bool,
+    pub sumo_fences_height: f32,
+    pub wool_wars_helper: bool,
+    pub anticheat_module_enabled: bool,
+    pub chat_bypass_enabled: bool,
+    pub fake_chat_enabled: bool,
+    pub latency_alerts_enabled: bool,
     pub name_hider_enabled: bool,
     pub fake_nick: String,
-    pub chat_bypass_enabled: bool,
+    pub view_packets_enabled: bool,
+
+    // CLICKGUI & FLOATING BUTTON STATE
     pub clickgui_open: bool,
+    pub float_btn_x: f32,
+    pub float_btn_y: f32,
+    pub dragging_btn: bool,
+    pub selected_module: &'static str,
+    pub col_scroll: [usize; 7],
 }
 
 impl Default for RavenConfig {
     fn default() -> Self {
         Self {
-            killaura_enabled: false,
-            killaura_mode: KillAuraMode::Switch,
-            killaura_range: 4.2,
-            killaura_swing_range: 5.0,
-            killaura_fov: 360.0,
-            killaura_min_cps: 11.0,
-            killaura_max_cps: 15.0,
-            killaura_rot_speed: 65.0,
-            killaura_autoblock: AutoblockMode::HypixelBlink,
-            killaura_teams: true,
-
             aim_assist_enabled: false,
             aim_assist_speed: 45.0,
             aim_assist_fov: 90.0,
             aim_assist_distance: 4.5,
-            aim_assist_click_only: true,
-
             autoclicker_enabled: false,
             autoclicker_min_cps: 12.0,
             autoclicker_max_cps: 16.0,
-            autoclicker_jitter: 0.35,
-            autoclicker_block_hit: true,
-
-            reach_enabled: false,
-            reach_min: 3.2,
-            reach_max: 3.6,
-
-            hitbox_enabled: false,
-            hitbox_expand: 0.15,
-
+            autoclicker_jitter: 0.3,
+            autoblock_enabled: false,
+            autoblock_mode: AutoblockMode::HypixelBlink,
             velocity_enabled: false,
             velocity_horizontal: 0.0,
             velocity_vertical: 100.0,
             velocity_chance: 100,
-
-            knockback_delay_enabled: false,
-            knockback_delay_ms: 90,
-
-            wtap_enabled: false,
-            jump_reset_enabled: false,
-            hit_select_enabled: false,
-            reduce_enabled: false,
-            reduce_multiplier: 0.6,
-            pierce_enabled: false,
-            rod_aimbot_enabled: false,
-            tp_aura_enabled: false,
-            tp_aura_range: 12.0,
             backtrack_enabled: false,
             backtrack_delay_ms: 150,
+            click_assist_enabled: false,
+            displace_enabled: false,
+            hitbox_enabled: false,
+            hitbox_expand: 0.15,
+            hit_select_enabled: false,
+            jump_reset_enabled: false,
+            killaura_enabled: false,
+            killaura_mode: KillAuraMode::Switch,
+            killaura_range: 4.2,
+            killaura_fov: 360.0,
+            killaura_min_cps: 11.0,
+            killaura_max_cps: 15.0,
+            killaura_rot_speed: 65.0,
+            knockback_delay_enabled: false,
+            knockback_delay_ms: 90,
             lag_range_enabled: false,
             lag_range_ticks: 4,
+            piercing_enabled: false,
+            reach_enabled: false,
+            reach_min: 3.2,
+            reach_max: 3.8,
+            reduce_enabled: false,
+            reduce_multiplier: 0.6,
+            rod_aimbot_enabled: false,
+            tp_aura_enabled: false,
+            tp_aura_range: 10.0,
+            wtap_enabled: false,
 
-            sprint_enabled: true,
-            sprint_omni: false,
-            keep_sprint_enabled: true,
-            noslow_enabled: true,
+            bhop_enabled: false,
+            boost_enabled: false,
+            dolphin_enabled: false,
             fly_enabled: false,
             fly_mode: FlyMode::Motion,
             fly_speed: 1.5,
-            speed_enabled: false,
-            speed_mode: SpeedMode::Strafe,
-            speed_multiplier: 1.35,
-            bhop_enabled: false,
+            instant_stop_enabled: false,
+            inv_move_enabled: false,
+            jump_enabled: false,
+            keep_sprint_enabled: false,
             long_jump_enabled: false,
-            long_jump_boost: 2.1,
-            timer_enabled: false,
-            timer_value: 1.25,
-            inv_move_enabled: true,
+            long_jump_boost: 2.0,
+            movement_fix_enabled: false,
+            noslow_enabled: false,
+            null_move_enabled: false,
+            speed_enabled: false,
+            speed_mode: SpeedMode::HypixelLowHop,
+            speed_multiplier: 1.35,
+            sprint_enabled: true,
+            sprint_omni: false,
+            stasis_enabled: false,
             step_enabled: false,
             step_height: 1.5,
+            stop_motion_enabled: false,
+            teleport_enabled: false,
+            timer_enabled: false,
+            timer_value: 1.25,
+            vclip_enabled: false,
             vclip_distance: -3.0,
-            dolphin_enabled: false,
-            instant_stop_enabled: false,
-            null_move_enabled: true,
-            movement_fix_enabled: true,
 
-            nofall_enabled: true,
-            fast_place_enabled: true,
-            fast_place_delay: 0,
-            fast_mine_enabled: false,
-            fast_mine_multiplier: 1.4,
-            safewalk_enabled: false,
+            anti_afk_enabled: false,
+            anti_fireball_enabled: false,
+            auto_jump_enabled: false,
+            auto_swap_enabled: false,
+            auto_tool_enabled: false,
+            bed_aura_enabled: false,
+            bed_aura_range: 4.5,
+            blink_enabled: false,
+            block_in_enabled: false,
             bridge_assist_enabled: false,
             bridge_assist_edge_dist: 0.22,
-            auto_tool_enabled: true,
-            auto_swap_enabled: true,
             chest_stealer_enabled: false,
             chest_stealer_delay_ticks: 2,
-            inv_manager_enabled: false,
-            blink_enabled: false,
+            delay_remover_enabled: false,
             fake_lag_enabled: false,
             fake_lag_interval_ms: 120,
-            anti_fireball_enabled: true,
-            water_bucket_enabled: true,
-            no_rotate_enabled: true,
-            ghost_hand_enabled: false,
-            delay_remover_enabled: true,
-            anti_afk_enabled: false,
-            auto_jump_enabled: false,
-            block_in_enabled: false,
+            fast_mine_enabled: false,
+            fast_mine_multiplier: 1.4,
+            fast_place_enabled: false,
+            fast_place_delay: 0,
             freecam_enabled: false,
             freecam_speed: 1.2,
+            ghost_hand_enabled: false,
+            inv_manager_enabled: false,
+            nofall_enabled: false,
+            no_rotate_enabled: false,
+            safewalk_enabled: false,
+            water_bucket_enabled: false,
 
+            antibot_enabled: true,
             scaffold_enabled: false,
-            scaffold_sprint: ScaffoldSprintMode::HypixelJump,
+            scaffold_sprint: ScaffoldSprintMode::HypixelJump2Sprint,
             scaffold_rotation: ScaffoldRotationMode::Precise,
             scaffold_schedule: ScaffoldScheduleMode::Telly,
             scaffold_tower: true,
-            bed_aura_enabled: false,
-            bed_aura_range: 4.5,
-            antibot_enabled: true,
-            weather_clear: true,
+            weather_clear: false,
 
-            hud_enabled: true,
-            keystrokes_enabled: true,
-            player_esp_enabled: true,
-            bed_esp_enabled: true,
-            chest_esp_enabled: true,
-            item_esp_enabled: false,
-            mob_esp_enabled: false,
-            tracers_enabled: false,
-            chams_enabled: true,
-            nametags_enabled: true,
-            target_hud_enabled: true,
-            trajectories_enabled: true,
-            freelook_enabled: false,
-            no_hurt_cam_enabled: true,
-            no_camera_clip_enabled: true,
-            fullbright_enabled: true,
-            xray_enabled: false,
-            indicators_enabled: true,
-            break_progress_enabled: true,
-            block_overlay_enabled: true,
-            saturation_hud_enabled: true,
-            tnt_timer_enabled: true,
+            animations_enabled: false,
+            anti_debuff_enabled: false,
+            anti_shuffle_enabled: false,
+            arrows_enabled: false,
+            bed_esp_enabled: false,
+            block_esp_enabled: false,
+            block_overlay_enabled: false,
+            break_progress_enabled: false,
+            chams_enabled: false,
+            chest_esp_enabled: false,
+            damage_tags_enabled: false,
+            damage_tint_enabled: false,
+            extend_camera_enabled: false,
             extend_camera_dist: 4.0,
+            fall_view_enabled: false,
+            freelook_enabled: false,
+            fullbright_enabled: false,
+            hud_enabled: true,
+            hit_particles_enabled: false,
+            holdlook_enabled: false,
+            indicators_enabled: false,
+            item_esp_enabled: false,
+            item_physics_enabled: false,
+            keystrokes_enabled: true,
+            mob_esp_enabled: false,
+            nametags_enabled: false,
+            no_camera_clip_enabled: false,
+            no_hurt_cam_enabled: false,
+            player_esp_enabled: false,
+            potion_hud_enabled: false,
+            radar_enabled: false,
+            saturation_hud_enabled: false,
+            tnt_timer_enabled: false,
+            target_hud_enabled: false,
+            tracers_enabled: false,
+            trajectories_enabled: false,
+            xray_enabled: false,
 
-            bedwars_helper: true,
-            skywars_helper: true,
-            murder_mystery_detector: true,
-            sumo_fences_enabled: false,
             auto_requeue_enabled: false,
+            auto_who_enabled: false,
+            bedwars_helper: false,
+            bridge_info_enabled: false,
+            duels_stats_enabled: false,
+            murder_mystery_detector: false,
+            skywars_helper: false,
+            speed_builders_helper: false,
+            sumo_fences_enabled: false,
+            sumo_fences_height: 2.0,
+            wool_wars_helper: false,
+            anticheat_module_enabled: false,
+            chat_bypass_enabled: false,
+            fake_chat_enabled: false,
+            latency_alerts_enabled: false,
             name_hider_enabled: false,
             fake_nick: String::from("Groot972"),
-            chat_bypass_enabled: false,
+            view_packets_enabled: false,
+
             clickgui_open: false,
+            float_btn_x: 6.0,
+            float_btn_y: 42.0,
+            dragging_btn: false,
+            selected_module: "FastPlace",
+            col_scroll: [0; 7],
         }
     }
 }
 
-// ============================================================================
-// MAIN RAVEN BS ENGINE RUNTIME
-// ============================================================================
-
 pub struct RavenEngine {
     pub cfg: RavenConfig,
     pub last_attack: Instant,
-    pub current_target_id: Option<u32>,
-    pub switch_index: usize,
-    pub backtrack_history: HashMap<u32, VecDeque<(Instant, Vec3)>>,
-    pub blink_buffer: VecDeque<OutgoingPacket>,
-    pub freecam_anchor: Option<Vec3>,
-    pub freelook_anchor: Option<(f32, f32)>,
     pub lmb_clicks: VecDeque<Instant>,
     pub rmb_clicks: VecDeque<Instant>,
-    pub air_ticks: u32,
-    pub murder_suspects: Vec<String>,
-    pub prng_state: u64,
 }
 
 impl Default for RavenEngine {
@@ -952,17 +661,8 @@ impl Default for RavenEngine {
         Self {
             cfg: RavenConfig::default(),
             last_attack: Instant::now(),
-            current_target_id: None,
-            switch_index: 0,
-            backtrack_history: HashMap::new(),
-            blink_buffer: VecDeque::new(),
-            freecam_anchor: None,
-            freelook_anchor: None,
             lmb_clicks: VecDeque::new(),
             rmb_clicks: VecDeque::new(),
-            air_ticks: 0,
-            murder_suspects: Vec::new(),
-            prng_state: 0x9E37_79B9_7F4A_7C15,
         }
     }
 }
@@ -974,1130 +674,1088 @@ pub fn global_raven() -> &'static Mutex<RavenEngine> {
     RAVEN_INSTANCE.get_or_init(|| Mutex::new(RavenEngine::default()))
 }
 
-impl RavenEngine {
-    #[inline]
-    fn next_rand_f32(&mut self) -> f32 {
-        let mut x = self.prng_state;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.prng_state = x;
-        let r = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
-        ((r >> 40) as u32) as f32 / ((1u32 << 24) as f32)
+const CATEGORIES: [&str; 7] = [
+    "Combat",
+    "Movement",
+    "Player",
+    "World",
+    "Render",
+    "Minigames",
+    "Other",
+];
+
+fn category_modules(cat: usize) -> &'static [&'static str] {
+    match cat {
+        0 => &[
+            "AimAssist",
+            "AutoClicker",
+            "Autoblock",
+            "Velocity",
+            "BackTrack",
+            "ClickAssist",
+            "Displace",
+            "HitBox",
+            "HitSelect",
+            "JumpReset",
+            "KillAura",
+            "KBDelay",
+            "LagRange",
+            "Piercing",
+            "Reach",
+            "Reduce",
+            "RodAimbot",
+            "TPAura",
+            "WTap",
+        ],
+        1 => &[
+            "BHop",
+            "Boost",
+            "Dolphin",
+            "Fly",
+            "InstantStop",
+            "InvMove",
+            "Jump",
+            "KeepSprint",
+            "LongJump",
+            "MovementFix",
+            "NoSlow",
+            "NullMove",
+            "Speed",
+            "Sprint",
+            "Stasis",
+            "Step",
+            "StopMotion",
+            "Teleport",
+            "Timer",
+            "VClip",
+        ],
+        2 => &[
+            "AntiAFK",
+            "AntiFireball",
+            "AutoJump",
+            "AutoSwap",
+            "AutoTool",
+            "BedAura",
+            "Blink",
+            "BlockIn",
+            "BridgeAssist",
+            "ChestStealer",
+            "DelayRemover",
+            "FakeLag",
+            "FastMine",
+            "FastPlace",
+            "Freecam",
+            "GhostHand",
+            "InvManager",
+            "NoFall",
+            "NoRotate",
+            "SafeWalk",
+            "WaterBucket",
+        ],
+        3 => &["AntiBot", "Scaffold", "Weather"],
+        4 => &[
+            "Animations",
+            "AntiDebuff",
+            "AntiShuffle",
+            "Arrows",
+            "BedESP",
+            "BlockESP",
+            "BlockOverlay",
+            "BreakProgress",
+            "Chams",
+            "ChestESP",
+            "DamageTags",
+            "DamageTint",
+            "ExtendCamera",
+            "FallView",
+            "Freelook",
+            "Fullbright",
+            "HUD",
+            "HitParticles",
+            "Holdlook",
+            "Indicators",
+            "ItemESP",
+            "ItemPhysics",
+            "Keystrokes",
+            "MobESP",
+            "Nametags",
+            "NoCameraClip",
+            "NoHurtCam",
+            "PlayerESP",
+            "PotionHUD",
+            "Radar",
+            "Saturation",
+            "TNTTimer",
+            "TargetHUD",
+            "Tracers",
+            "Trajectories",
+            "Xray",
+        ],
+        5 => &[
+            "AutoRequeue",
+            "AutoWho",
+            "BedWars",
+            "BridgeInfo",
+            "DuelsStats",
+            "MurderMystery",
+            "SkyWars",
+            "SpeedBuilders",
+            "SumoFences",
+            "WoolWars",
+        ],
+        _ => &[
+            "Anticheat",
+            "ChatBypass",
+            "FakeChat",
+            "LatencyAlerts",
+            "NameHider",
+            "ViewPackets",
+        ],
+    }
+}
+
+impl RavenConfig {
+    pub fn is_enabled(&self, name: &str) -> bool {
+        match name {
+            "AimAssist" => self.aim_assist_enabled,
+            "AutoClicker" => self.autoclicker_enabled,
+            "Autoblock" => self.autoblock_enabled,
+            "Velocity" => self.velocity_enabled,
+            "BackTrack" => self.backtrack_enabled,
+            "ClickAssist" => self.click_assist_enabled,
+            "Displace" => self.displace_enabled,
+            "HitBox" => self.hitbox_enabled,
+            "HitSelect" => self.hit_select_enabled,
+            "JumpReset" => self.jump_reset_enabled,
+            "KillAura" => self.killaura_enabled,
+            "KBDelay" => self.knockback_delay_enabled,
+            "LagRange" => self.lag_range_enabled,
+            "Piercing" => self.piercing_enabled,
+            "Reach" => self.reach_enabled,
+            "Reduce" => self.reduce_enabled,
+            "RodAimbot" => self.rod_aimbot_enabled,
+            "TPAura" => self.tp_aura_enabled,
+            "WTap" => self.wtap_enabled,
+
+            "BHop" => self.bhop_enabled,
+            "Boost" => self.boost_enabled,
+            "Dolphin" => self.dolphin_enabled,
+            "Fly" => self.fly_enabled,
+            "InstantStop" => self.instant_stop_enabled,
+            "InvMove" => self.inv_move_enabled,
+            "Jump" => self.jump_enabled,
+            "KeepSprint" => self.keep_sprint_enabled,
+            "LongJump" => self.long_jump_enabled,
+            "MovementFix" => self.movement_fix_enabled,
+            "NoSlow" => self.noslow_enabled,
+            "NullMove" => self.null_move_enabled,
+            "Speed" => self.speed_enabled,
+            "Sprint" => self.sprint_enabled,
+            "Stasis" => self.stasis_enabled,
+            "Step" => self.step_enabled,
+            "StopMotion" => self.stop_motion_enabled,
+            "Teleport" => self.teleport_enabled,
+            "Timer" => self.timer_enabled,
+            "VClip" => self.vclip_enabled,
+
+            "AntiAFK" => self.anti_afk_enabled,
+            "AntiFireball" => self.anti_fireball_enabled,
+            "AutoJump" => self.auto_jump_enabled,
+            "AutoSwap" => self.auto_swap_enabled,
+            "AutoTool" => self.auto_tool_enabled,
+            "BedAura" => self.bed_aura_enabled,
+            "Blink" => self.blink_enabled,
+            "BlockIn" => self.block_in_enabled,
+            "BridgeAssist" => self.bridge_assist_enabled,
+            "ChestStealer" => self.chest_stealer_enabled,
+            "DelayRemover" => self.delay_remover_enabled,
+            "FakeLag" => self.fake_lag_enabled,
+            "FastMine" => self.fast_mine_enabled,
+            "FastPlace" => self.fast_place_enabled,
+            "Freecam" => self.freecam_enabled,
+            "GhostHand" => self.ghost_hand_enabled,
+            "InvManager" => self.inv_manager_enabled,
+            "NoFall" => self.nofall_enabled,
+            "NoRotate" => self.no_rotate_enabled,
+            "SafeWalk" => self.safewalk_enabled,
+            "WaterBucket" => self.water_bucket_enabled,
+
+            "AntiBot" => self.antibot_enabled,
+            "Scaffold" => self.scaffold_enabled,
+            "Weather" => self.weather_clear,
+
+            "Animations" => self.animations_enabled,
+            "AntiDebuff" => self.anti_debuff_enabled,
+            "AntiShuffle" => self.anti_shuffle_enabled,
+            "Arrows" => self.arrows_enabled,
+            "BedESP" => self.bed_esp_enabled,
+            "BlockESP" => self.block_esp_enabled,
+            "BlockOverlay" => self.block_overlay_enabled,
+            "BreakProgress" => self.break_progress_enabled,
+            "Chams" => self.chams_enabled,
+            "ChestESP" => self.chest_esp_enabled,
+            "DamageTags" => self.damage_tags_enabled,
+            "DamageTint" => self.damage_tint_enabled,
+            "ExtendCamera" => self.extend_camera_enabled,
+            "FallView" => self.fall_view_enabled,
+            "Freelook" => self.freelook_enabled,
+            "Fullbright" => self.fullbright_enabled,
+            "HUD" => self.hud_enabled,
+            "HitParticles" => self.hit_particles_enabled,
+            "Holdlook" => self.holdlook_enabled,
+            "Indicators" => self.indicators_enabled,
+            "ItemESP" => self.item_esp_enabled,
+            "ItemPhysics" => self.item_physics_enabled,
+            "Keystrokes" => self.keystrokes_enabled,
+            "MobESP" => self.mob_esp_enabled,
+            "Nametags" => self.nametags_enabled,
+            "NoCameraClip" => self.no_camera_clip_enabled,
+            "NoHurtCam" => self.no_hurt_cam_enabled,
+            "PlayerESP" => self.player_esp_enabled,
+            "PotionHUD" => self.potion_hud_enabled,
+            "Radar" => self.radar_enabled,
+            "Saturation" => self.saturation_hud_enabled,
+            "TNTTimer" => self.tnt_timer_enabled,
+            "TargetHUD" => self.target_hud_enabled,
+            "Tracers" => self.tracers_enabled,
+            "Trajectories" => self.trajectories_enabled,
+            "Xray" => self.xray_enabled,
+
+            "AutoRequeue" => self.auto_requeue_enabled,
+            "AutoWho" => self.auto_who_enabled,
+            "BedWars" => self.bedwars_helper,
+            "BridgeInfo" => self.bridge_info_enabled,
+            "DuelsStats" => self.duels_stats_enabled,
+            "MurderMystery" => self.murder_mystery_detector,
+            "SkyWars" => self.skywars_helper,
+            "SpeedBuilders" => self.speed_builders_helper,
+            "SumoFences" => self.sumo_fences_enabled,
+            "WoolWars" => self.wool_wars_helper,
+
+            "Anticheat" => self.anticheat_module_enabled,
+            "ChatBypass" => self.chat_bypass_enabled,
+            "FakeChat" => self.fake_chat_enabled,
+            "LatencyAlerts" => self.latency_alerts_enabled,
+            "NameHider" => self.name_hider_enabled,
+            "ViewPackets" => self.view_packets_enabled,
+            _ => false,
+        }
     }
 
-    /// Main client tick hook: runs every 50ms (or scaled by Timer)
-    pub fn on_tick(&mut self, ctx: &mut WorldContext) {
-        ctx.tick_counter = ctx.tick_counter.wrapping_add(1);
+    pub fn toggle(&mut self, name: &str) -> bool {
+        let state = match name {
+            "AimAssist" => { self.aim_assist_enabled = !self.aim_assist_enabled; self.aim_assist_enabled }
+            "AutoClicker" => { self.autoclicker_enabled = !self.autoclicker_enabled; self.autoclicker_enabled }
+            "Autoblock" => { self.autoblock_enabled = !self.autoblock_enabled; self.autoblock_enabled }
+            "Velocity" => { self.velocity_enabled = !self.velocity_enabled; self.velocity_enabled }
+            "BackTrack" => { self.backtrack_enabled = !self.backtrack_enabled; self.backtrack_enabled }
+            "ClickAssist" => { self.click_assist_enabled = !self.click_assist_enabled; self.click_assist_enabled }
+            "Displace" => { self.displace_enabled = !self.displace_enabled; self.displace_enabled }
+            "HitBox" => { self.hitbox_enabled = !self.hitbox_enabled; self.hitbox_enabled }
+            "HitSelect" => { self.hit_select_enabled = !self.hit_select_enabled; self.hit_select_enabled }
+            "JumpReset" => { self.jump_reset_enabled = !self.jump_reset_enabled; self.jump_reset_enabled }
+            "KillAura" => { self.killaura_enabled = !self.killaura_enabled; self.killaura_enabled }
+            "KBDelay" => { self.knockback_delay_enabled = !self.knockback_delay_enabled; self.knockback_delay_enabled }
+            "LagRange" => { self.lag_range_enabled = !self.lag_range_enabled; self.lag_range_enabled }
+            "Piercing" => { self.piercing_enabled = !self.piercing_enabled; self.piercing_enabled }
+            "Reach" => { self.reach_enabled = !self.reach_enabled; self.reach_enabled }
+            "Reduce" => { self.reduce_enabled = !self.reduce_enabled; self.reduce_enabled }
+            "RodAimbot" => { self.rod_aimbot_enabled = !self.rod_aimbot_enabled; self.rod_aimbot_enabled }
+            "TPAura" => { self.tp_aura_enabled = !self.tp_aura_enabled; self.tp_aura_enabled }
+            "WTap" => { self.wtap_enabled = !self.wtap_enabled; self.wtap_enabled }
 
-        if ctx.player.on_ground {
-            self.air_ticks = 0;
-        } else {
-            self.air_ticks = self.air_ticks.saturating_add(1);
-        }
+            "BHop" => { self.bhop_enabled = !self.bhop_enabled; self.bhop_enabled }
+            "Boost" => { self.boost_enabled = !self.boost_enabled; self.boost_enabled }
+            "Dolphin" => { self.dolphin_enabled = !self.dolphin_enabled; self.dolphin_enabled }
+            "Fly" => { self.fly_enabled = !self.fly_enabled; self.fly_enabled }
+            "InstantStop" => { self.instant_stop_enabled = !self.instant_stop_enabled; self.instant_stop_enabled }
+            "InvMove" => { self.inv_move_enabled = !self.inv_move_enabled; self.inv_move_enabled }
+            "Jump" => { self.jump_enabled = !self.jump_enabled; self.jump_enabled }
+            "KeepSprint" => { self.keep_sprint_enabled = !self.keep_sprint_enabled; self.keep_sprint_enabled }
+            "LongJump" => { self.long_jump_enabled = !self.long_jump_enabled; self.long_jump_enabled }
+            "MovementFix" => { self.movement_fix_enabled = !self.movement_fix_enabled; self.movement_fix_enabled }
+            "NoSlow" => { self.noslow_enabled = !self.noslow_enabled; self.noslow_enabled }
+            "NullMove" => { self.null_move_enabled = !self.null_move_enabled; self.null_move_enabled }
+            "Speed" => { self.speed_enabled = !self.speed_enabled; self.speed_enabled }
+            "Sprint" => { self.sprint_enabled = !self.sprint_enabled; self.sprint_enabled }
+            "Stasis" => { self.stasis_enabled = !self.stasis_enabled; self.stasis_enabled }
+            "Step" => { self.step_enabled = !self.step_enabled; self.step_enabled }
+            "StopMotion" => { self.stop_motion_enabled = !self.stop_motion_enabled; self.stop_motion_enabled }
+            "Teleport" => { self.teleport_enabled = !self.teleport_enabled; self.teleport_enabled }
+            "Timer" => { self.timer_enabled = !self.timer_enabled; self.timer_enabled }
+            "VClip" => { self.vclip_enabled = !self.vclip_enabled; self.vclip_enabled }
 
-        self.update_backtrack(ctx);
+            "AntiAFK" => { self.anti_afk_enabled = !self.anti_afk_enabled; self.anti_afk_enabled }
+            "AntiFireball" => { self.anti_fireball_enabled = !self.anti_fireball_enabled; self.anti_fireball_enabled }
+            "AutoJump" => { self.auto_jump_enabled = !self.auto_jump_enabled; self.auto_jump_enabled }
+            "AutoSwap" => { self.auto_swap_enabled = !self.auto_swap_enabled; self.auto_swap_enabled }
+            "AutoTool" => { self.auto_tool_enabled = !self.auto_tool_enabled; self.auto_tool_enabled }
+            "BedAura" => { self.bed_aura_enabled = !self.bed_aura_enabled; self.bed_aura_enabled }
+            "Blink" => { self.blink_enabled = !self.blink_enabled; self.blink_enabled }
+            "BlockIn" => { self.block_in_enabled = !self.block_in_enabled; self.block_in_enabled }
+            "BridgeAssist" => { self.bridge_assist_enabled = !self.bridge_assist_enabled; self.bridge_assist_enabled }
+            "ChestStealer" => { self.chest_stealer_enabled = !self.chest_stealer_enabled; self.chest_stealer_enabled }
+            "DelayRemover" => { self.delay_remover_enabled = !self.delay_remover_enabled; self.delay_remover_enabled }
+            "FakeLag" => { self.fake_lag_enabled = !self.fake_lag_enabled; self.fake_lag_enabled }
+            "FastMine" => { self.fast_mine_enabled = !self.fast_mine_enabled; self.fast_mine_enabled }
+            "FastPlace" => { self.fast_place_enabled = !self.fast_place_enabled; self.fast_place_enabled }
+            "Freecam" => { self.freecam_enabled = !self.freecam_enabled; self.freecam_enabled }
+            "GhostHand" => { self.ghost_hand_enabled = !self.ghost_hand_enabled; self.ghost_hand_enabled }
+            "InvManager" => { self.inv_manager_enabled = !self.inv_manager_enabled; self.inv_manager_enabled }
+            "NoFall" => { self.nofall_enabled = !self.nofall_enabled; self.nofall_enabled }
+            "NoRotate" => { self.no_rotate_enabled = !self.no_rotate_enabled; self.no_rotate_enabled }
+            "SafeWalk" => { self.safewalk_enabled = !self.safewalk_enabled; self.safewalk_enabled }
+            "WaterBucket" => { self.water_bucket_enabled = !self.water_bucket_enabled; self.water_bucket_enabled }
 
-        self.run_anti_fireball(ctx);
-        self.run_killaura(ctx);
-        self.run_aim_assist(ctx);
-        self.run_autoclicker(ctx);
-        self.run_rod_aimbot(ctx);
-        self.run_tp_aura(ctx);
-        self.run_wtap_and_jump_reset(ctx);
+            "AntiBot" => { self.antibot_enabled = !self.antibot_enabled; self.antibot_enabled }
+            "Scaffold" => { self.scaffold_enabled = !self.scaffold_enabled; self.scaffold_enabled }
+            "Weather" => { self.weather_clear = !self.weather_clear; self.weather_clear }
 
-        self.run_timer(ctx);
-        self.run_sprint(ctx);
-        self.run_fly(ctx);
-        self.run_speed_and_bhop(ctx);
-        self.run_long_jump(ctx);
-        self.run_step_and_dolphin(ctx);
-        self.run_instant_stop(ctx);
+            "Animations" => { self.animations_enabled = !self.animations_enabled; self.animations_enabled }
+            "AntiDebuff" => { self.anti_debuff_enabled = !self.anti_debuff_enabled; self.anti_debuff_enabled }
+            "AntiShuffle" => { self.anti_shuffle_enabled = !self.anti_shuffle_enabled; self.anti_shuffle_enabled }
+            "Arrows" => { self.arrows_enabled = !self.arrows_enabled; self.arrows_enabled }
+            "BedESP" => { self.bed_esp_enabled = !self.bed_esp_enabled; self.bed_esp_enabled }
+            "BlockESP" => { self.block_esp_enabled = !self.block_esp_enabled; self.block_esp_enabled }
+            "BlockOverlay" => { self.block_overlay_enabled = !self.block_overlay_enabled; self.block_overlay_enabled }
+            "BreakProgress" => { self.break_progress_enabled = !self.break_progress_enabled; self.break_progress_enabled }
+            "Chams" => { self.chams_enabled = !self.chams_enabled; self.chams_enabled }
+            "ChestESP" => { self.chest_esp_enabled = !self.chest_esp_enabled; self.chest_esp_enabled }
+            "DamageTags" => { self.damage_tags_enabled = !self.damage_tags_enabled; self.damage_tags_enabled }
+            "DamageTint" => { self.damage_tint_enabled = !self.damage_tint_enabled; self.damage_tint_enabled }
+            "ExtendCamera" => { self.extend_camera_enabled = !self.extend_camera_enabled; self.extend_camera_enabled }
+            "FallView" => { self.fall_view_enabled = !self.fall_view_enabled; self.fall_view_enabled }
+            "Freelook" => { self.freelook_enabled = !self.freelook_enabled; self.freelook_enabled }
+            "Fullbright" => { self.fullbright_enabled = !self.fullbright_enabled; self.fullbright_enabled }
+            "HUD" => { self.hud_enabled = !self.hud_enabled; self.hud_enabled }
+            "HitParticles" => { self.hit_particles_enabled = !self.hit_particles_enabled; self.hit_particles_enabled }
+            "Holdlook" => { self.holdlook_enabled = !self.holdlook_enabled; self.holdlook_enabled }
+            "Indicators" => { self.indicators_enabled = !self.indicators_enabled; self.indicators_enabled }
+            "ItemESP" => { self.item_esp_enabled = !self.item_esp_enabled; self.item_esp_enabled }
+            "ItemPhysics" => { self.item_physics_enabled = !self.item_physics_enabled; self.item_physics_enabled }
+            "Keystrokes" => { self.keystrokes_enabled = !self.keystrokes_enabled; self.keystrokes_enabled }
+            "MobESP" => { self.mob_esp_enabled = !self.mob_esp_enabled; self.mob_esp_enabled }
+            "Nametags" => { self.nametags_enabled = !self.nametags_enabled; self.nametags_enabled }
+            "NoCameraClip" => { self.no_camera_clip_enabled = !self.no_camera_clip_enabled; self.no_camera_clip_enabled }
+            "NoHurtCam" => { self.no_hurt_cam_enabled = !self.no_hurt_cam_enabled; self.no_hurt_cam_enabled }
+            "PlayerESP" => { self.player_esp_enabled = !self.player_esp_enabled; self.player_esp_enabled }
+            "PotionHUD" => { self.potion_hud_enabled = !self.potion_hud_enabled; self.potion_hud_enabled }
+            "Radar" => { self.radar_enabled = !self.radar_enabled; self.radar_enabled }
+            "Saturation" => { self.saturation_hud_enabled = !self.saturation_hud_enabled; self.saturation_hud_enabled }
+            "TNTTimer" => { self.tnt_timer_enabled = !self.tnt_timer_enabled; self.tnt_timer_enabled }
+            "TargetHUD" => { self.target_hud_enabled = !self.target_hud_enabled; self.target_hud_enabled }
+            "Tracers" => { self.tracers_enabled = !self.tracers_enabled; self.tracers_enabled }
+            "Trajectories" => { self.trajectories_enabled = !self.trajectories_enabled; self.trajectories_enabled }
+            "Xray" => { self.xray_enabled = !self.xray_enabled; self.xray_enabled }
 
-        self.run_delay_remover(ctx);
-        self.run_fast_place(ctx);
-        self.run_nofall(ctx);
-        self.run_safewalk_and_bridge_assist(ctx);
-        self.run_water_bucket_mlg(ctx);
-        self.run_auto_tool(ctx);
-        self.run_chest_stealer_and_inv_manager(ctx);
-        self.run_blink_and_fakelag(ctx);
-        self.run_block_in(ctx);
-        self.run_freecam(ctx);
+            "AutoRequeue" => { self.auto_requeue_enabled = !self.auto_requeue_enabled; self.auto_requeue_enabled }
+            "AutoWho" => { self.auto_who_enabled = !self.auto_who_enabled; self.auto_who_enabled }
+            "BedWars" => { self.bedwars_helper = !self.bedwars_helper; self.bedwars_helper }
+            "BridgeInfo" => { self.bridge_info_enabled = !self.bridge_info_enabled; self.bridge_info_enabled }
+            "DuelsStats" => { self.duels_stats_enabled = !self.duels_stats_enabled; self.duels_stats_enabled }
+            "MurderMystery" => { self.murder_mystery_detector = !self.murder_mystery_detector; self.murder_mystery_detector }
+            "SkyWars" => { self.skywars_helper = !self.skywars_helper; self.skywars_helper }
+            "SpeedBuilders" => { self.speed_builders_helper = !self.speed_builders_helper; self.speed_builders_helper }
+            "SumoFences" => { self.sumo_fences_enabled = !self.sumo_fences_enabled; self.sumo_fences_enabled }
+            "WoolWars" => { self.wool_wars_helper = !self.wool_wars_helper; self.wool_wars_helper }
 
-        self.run_bed_aura(ctx);
-        self.run_scaffold(ctx);
+            "Anticheat" => { self.anticheat_module_enabled = !self.anticheat_module_enabled; self.anticheat_module_enabled }
+            "ChatBypass" => { self.chat_bypass_enabled = !self.chat_bypass_enabled; self.chat_bypass_enabled }
+            "FakeChat" => { self.fake_chat_enabled = !self.fake_chat_enabled; self.fake_chat_enabled }
+            "LatencyAlerts" => { self.latency_alerts_enabled = !self.latency_alerts_enabled; self.latency_alerts_enabled }
+            "NameHider" => { self.name_hider_enabled = !self.name_hider_enabled; self.name_hider_enabled }
+            "ViewPackets" => { self.view_packets_enabled = !self.view_packets_enabled; self.view_packets_enabled }
+            _ => false,
+        };
+        state
+    }
+}
 
-        self.run_minigame_helpers(ctx);
-        self.run_render_state(ctx);
-        self.render_overlays(ctx);
+/// Intercepts `.menu`, `.gui`, `.raven`, or any `.<module>` command typed in chat
+pub fn handle_dot_command(msg: &str) -> Option<String> {
+    let trimmed = msg.trim();
+    if !trimmed.starts_with('.') {
+        return None;
+    }
+    let cmd = trimmed[1..].trim();
+    let mut raven = global_raven().lock().ok()?;
+
+    if cmd.eq_ignore_ascii_case("menu")
+        || cmd.eq_ignore_ascii_case("gui")
+        || cmd.eq_ignore_ascii_case("raven")
+    {
+        raven.cfg.clickgui_open = !raven.cfg.clickgui_open;
+        return Some(String::new());
     }
 
-    // ========================================================================
-    // COMBAT MODULES
-    // ========================================================================
-
-    fn is_valid_combat_target(&self, ctx: &WorldContext, e: &EntitySnapshot) -> bool {
-        if e.id == ctx.player.entity_id || !e.is_player || e.health <= 0.0 {
-            return false;
+    // Match any module name directly (e.g. `.fastplace`, `.killaura`, `.scaffold`, `.sumo`)
+    for cat in 0..7 {
+        for &m in category_modules(cat) {
+            if m.eq_ignore_ascii_case(cmd) {
+                let state = raven.cfg.toggle(m);
+                return Some(format!(
+                    "[Raven bS+] {} -> {}",
+                    m,
+                    if state { "ON" } else { "OFF" }
+                ));
+            }
         }
-        if self.cfg.antibot_enabled && (e.ticks_existed < 20 || e.ping < 0) {
-            return false;
-        }
-        if self.cfg.killaura_teams && e.team_color == ctx.player.team_color && e.team_color != 0 {
-            return false;
-        }
-        true
     }
 
-    fn update_backtrack(&mut self, ctx: &WorldContext) {
-        let now = Instant::now();
-        let max_age = Duration::from_millis(self.cfg.backtrack_delay_ms.max(50));
-        for e in &ctx.entities {
-            if e.is_player && e.id != ctx.player.entity_id {
-                let queue = self.backtrack_history.entry(e.id).or_default();
-                queue.push_back((now, e.pos));
-                while let Some((ts, _)) = queue.front() {
-                    if now.duration_since(*ts) > max_age {
-                        queue.pop_front();
+    Some(String::from(
+        "[Raven bS+] Tape .menu pour ouvrir le ClickGUI Raven ou .<module> (ex: .fastplace, .scaffold, .killaura)",
+    ))
+}
+
+/// Handles touch input for both the floating `[ R ]` button and the full 7-column Raven bS+ ClickGUI
+pub fn handle_touch_event(
+    x: f32,
+    y: f32,
+    screen_w: f32,
+    screen_h: f32,
+    started: bool,
+    moved: bool,
+    ended: bool,
+) -> bool {
+    let Ok(mut raven) = global_raven().lock() else {
+        return false;
+    };
+
+    // 1. When ClickGUI is closed: only check the floating draggable `[ R ]` button
+    if !raven.cfg.clickgui_open {
+        let bx = raven.cfg.float_btn_x;
+        let by = raven.cfg.float_btn_y;
+        let bw = 28.0;
+        let bh = 22.0;
+
+        if started && x >= bx && x <= bx + bw && y >= by && y <= by + bh {
+            raven.cfg.dragging_btn = true;
+            return true;
+        }
+        if moved && raven.cfg.dragging_btn {
+            raven.cfg.float_btn_x = (x - bw * 0.5).clamp(2.0, (screen_w - bw - 2.0).max(2.0));
+            raven.cfg.float_btn_y = (y - bh * 0.5).clamp(2.0, (screen_h - bh - 2.0).max(2.0));
+            return true;
+        }
+        if ended && raven.cfg.dragging_btn {
+            raven.cfg.dragging_btn = false;
+            if (x - (bx + bw * 0.5)).abs() < 14.0 && (y - (by + bh * 0.5)).abs() < 14.0 {
+                raven.cfg.clickgui_open = true;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // 2. When ClickGUI is open: swallow all touches so the player never attacks/moves behind the menu
+    if !started {
+        return true;
+    }
+
+    // Check top-left `[ X ]` button (x: 6..30, y: 4..22) and top-right `[ X ]` button (x: screen_w-30..screen_w-6, y: 4..22)
+    if (y >= 2.0 && y <= 24.0) && ((x >= 4.0 && x <= 32.0) || (x >= screen_w - 32.0 && x <= screen_w - 4.0)) {
+        raven.cfg.clickgui_open = false;
+        return true;
+    }
+
+    // Layout metrics matching `draw_hud_and_clickgui`
+    let margin_x = 6.0;
+    let gap = 3.0;
+    let col_w = ((screen_w - margin_x * 2.0 - gap * 6.0) / 7.0).max(52.0);
+    let top_y = 26.0;
+    let header_h = 14.0;
+    let row_h = 13.0;
+    let settings_top = (screen_h - 64.0).max(top_y + header_h + row_h * 5.0);
+    let max_rows = (((settings_top - top_y - header_h - 6.0) / row_h).floor() as usize).max(4);
+
+    // Check clicks inside the 7 category columns
+    for cat in 0..7 {
+        let cx = margin_x + (cat as f32) * (col_w + gap);
+        if x >= cx && x <= cx + col_w {
+            // Header scroll buttons: left half scrolls up, right half scrolls down
+            if y >= top_y && y <= top_y + header_h {
+                let mods = category_modules(cat);
+                if x < cx + col_w * 0.5 {
+                    raven.cfg.col_scroll[cat] = raven.cfg.col_scroll[cat].saturating_sub(2);
+                } else if raven.cfg.col_scroll[cat] + max_rows < mods.len() {
+                    raven.cfg.col_scroll[cat] = (raven.cfg.col_scroll[cat] + 2).min(mods.len().saturating_sub(max_rows));
+                }
+                return true;
+            }
+
+            // Module rows
+            let mods = category_modules(cat);
+            let scroll = raven.cfg.col_scroll[cat];
+            for (idx, &m) in mods.iter().skip(scroll).take(max_rows).enumerate() {
+                let ry = top_y + header_h + (idx as f32) * row_h;
+                if y >= ry && y <= ry + row_h {
+                    // Rightmost 14px = `[+]` button to select this module for settings editor
+                    if x >= cx + col_w - 14.0 {
+                        raven.cfg.selected_module = m;
                     } else {
-                        break;
+                        raven.cfg.toggle(m);
+                        raven.cfg.selected_module = m;
                     }
+                    return true;
                 }
             }
         }
     }
 
-    fn effective_target_pos(&self, e: &EntitySnapshot, eye: Vec3) -> Vec3 {
-        if self.cfg.backtrack_enabled {
-            if let Some(history) = self.backtrack_history.get(&e.id) {
-                if let Some((_, best_pos)) = history
-                    .iter()
-                    .min_by(|a, b| a.1.dist_sq(eye).partial_cmp(&b.1.dist_sq(eye)).unwrap())
-                {
-                    return *best_pos;
+    // Check clicks inside the bottom Settings Inspector Bar (y >= settings_top)
+    if y >= settings_top && y <= screen_h - 4.0 {
+        handle_settings_bar_touch(&mut raven.cfg, x, y, screen_w, settings_top);
+    }
+
+    true
+}
+
+fn handle_settings_bar_touch(cfg: &mut RavenConfig, x: f32, y: f32, screen_w: f32, top: f32) {
+    let row1_y = top + 16.0;
+    let row2_y = top + 34.0;
+    let mid_x = screen_w * 0.5;
+
+    let in_row1 = y >= row1_y && y <= row1_y + 15.0;
+    let in_row2 = y >= row2_y && y <= row2_y + 15.0;
+    let is_minus = (x >= 130.0 && x <= 165.0) || (x >= mid_x + 110.0 && x <= mid_x + 145.0);
+    let is_plus = (x >= 170.0 && x <= 205.0) || (x >= mid_x + 150.0 && x <= mid_x + 185.0);
+    let delta: f32 = if is_minus { -1.0 } else if is_plus { 1.0 } else { 0.0 };
+
+    match cfg.selected_module {
+        "FastPlace" => {
+            if in_row1 && delta != 0.0 {
+                cfg.fast_place_delay = (cfg.fast_place_delay as i32 + delta as i32).clamp(0, 4) as u8;
+            }
+        }
+        "Reach" => {
+            if in_row1 && delta != 0.0 {
+                cfg.reach_min = (cfg.reach_min + f64::from(delta) * 0.1).clamp(3.0, 6.0);
+                if cfg.reach_max < cfg.reach_min {
+                    cfg.reach_max = cfg.reach_min;
                 }
+            } else if in_row2 && delta != 0.0 {
+                cfg.reach_max = (cfg.reach_max + f64::from(delta) * 0.1).clamp(cfg.reach_min, 6.0);
             }
         }
-        e.pos
-    }
-
-    fn run_killaura(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.killaura_enabled {
-            self.current_target_id = None;
-            return;
-        }
-
-        let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        let max_range = self.cfg.killaura_range.max(self.cfg.reach_max);
-
-        let mut candidates: Vec<(u32, Vec3, f32)> = ctx
-            .entities
-            .iter()
-            .filter(|e| self.is_valid_combat_target(ctx, e))
-            .filter_map(|e| {
-                let tpos = self.effective_target_pos(e, eye);
-                let aim_point = Vec3::new(tpos.x, tpos.y + e.height * 0.85, tpos.z);
-                let d = eye.dist(aim_point);
-                let fov = RotationUtils::fov_diff(ctx.player.yaw, eye, aim_point);
-                if d <= max_range && fov <= self.cfg.killaura_fov {
-                    Some((e.id, aim_point, e.health))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if candidates.is_empty() {
-            self.current_target_id = None;
-            ctx.player.blocking = false;
-            return;
-        }
-
-        candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
-
-        let idx = match self.cfg.killaura_mode {
-            KillAuraMode::Single => 0,
-            KillAuraMode::Switch | KillAuraMode::Multi => self.switch_index % candidates.len(),
-        };
-        let (target_id, aim_point, _) = candidates[idx];
-        self.current_target_id = Some(target_id);
-
-        let desired_rot = RotationUtils::rotations_to_vec(eye, aim_point);
-        let (nyaw, npitch) = RotationUtils::smooth_step(
-            (ctx.player.server_yaw, ctx.player.server_pitch),
-            desired_rot,
-            self.cfg.killaura_rot_speed,
-        );
-        ctx.player.server_yaw = nyaw;
-        ctx.player.server_pitch = npitch;
-
-        let t = self.next_rand_f32();
-        let cps = self.cfg.killaura_min_cps
-            + t * (self.cfg.killaura_max_cps - self.cfg.killaura_min_cps);
-        let delay = Duration::from_secs_f32(1.0 / cps.max(1.0));
-
-        if self.last_attack.elapsed() >= delay {
-            self.last_attack = Instant::now();
-            self.switch_index = self.switch_index.wrapping_add(1);
-            self.lmb_clicks.push_back(self.last_attack);
-
-            ctx.player.swinging = true;
-
-            if self.cfg.killaura_mode == KillAuraMode::Multi {
-                for (cid, cpos, _) in &candidates {
-                    ctx.send_packet(OutgoingPacket {
-                        packet_id: 0x02,
-                        timestamp: Instant::now(),
-                        pos: Some(*cpos),
-                        rot: Some((nyaw, npitch)),
-                        target_entity: Some(*cid),
-                        raw_bytes: vec![0x02, (*cid & 0xFF) as u8],
-                    });
-                }
-            } else {
-                ctx.send_packet(OutgoingPacket {
-                    packet_id: 0x02,
-                    timestamp: Instant::now(),
-                    pos: Some(aim_point),
-                    rot: Some((nyaw, npitch)),
-                    target_entity: Some(target_id),
-                    raw_bytes: vec![0x02, (target_id & 0xFF) as u8],
-                });
-            }
-
-            if self.cfg.keep_sprint_enabled {
-                ctx.player.sprinting = true;
-            } else if self.cfg.reduce_enabled {
-                ctx.player.vel.x *= self.cfg.reduce_multiplier;
-                ctx.player.vel.z *= self.cfg.reduce_multiplier;
-            }
-
-            match self.cfg.killaura_autoblock {
-                AutoblockMode::Vanilla | AutoblockMode::Interact => {
-                    ctx.player.blocking = true;
-                    ctx.send_packet(OutgoingPacket {
-                        packet_id: 0x08,
-                        timestamp: Instant::now(),
-                        pos: None,
-                        rot: None,
-                        target_entity: None,
-                        raw_bytes: vec![0x08, 0xFF],
-                    });
-                }
-                AutoblockMode::HypixelBlink => {
-                    ctx.player.blocking = ctx.tick_counter % 2 == 0;
-                }
-                AutoblockMode::Fake => {
-                    ctx.player.blocking = true;
-                }
+        "KillAura" => {
+            if in_row1 && x < mid_x && delta != 0.0 {
+                cfg.killaura_range = (cfg.killaura_range + f64::from(delta) * 0.1).clamp(3.0, 6.0);
+            } else if in_row1 && x >= mid_x {
+                cfg.killaura_mode = cfg.killaura_mode.next();
+            } else if in_row2 && delta != 0.0 {
+                cfg.killaura_max_cps = (cfg.killaura_max_cps + delta).clamp(4.0, 25.0);
             }
         }
-    }
-
-    fn run_aim_assist(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.aim_assist_enabled {
-            return;
-        }
-        if self.cfg.aim_assist_click_only && !ctx.player.attack_pressed {
-            return;
-        }
-
-        let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        let target_aim = ctx
-            .entities
-            .iter()
-            .filter(|e| self.is_valid_combat_target(ctx, e))
-            .filter(|e| {
-                let d = eye.dist(e.pos);
-                let fov = RotationUtils::fov_diff(ctx.player.yaw, eye, e.pos);
-                d <= self.cfg.aim_assist_distance && fov <= self.cfg.aim_assist_fov
-            })
-            .min_by(|a, b| eye.dist_sq(a.pos).partial_cmp(&eye.dist_sq(b.pos)).unwrap())
-            .map(|target| Vec3::new(target.pos.x, target.pos.y + target.height * 0.8, target.pos.z));
-
-        if let Some(aim_pt) = target_aim {
-            let desired = RotationUtils::rotations_to_vec(eye, aim_pt);
-            let (nyaw, npitch) = RotationUtils::smooth_step(
-                (ctx.player.yaw, ctx.player.pitch),
-                desired,
-                self.cfg.aim_assist_speed,
-            );
-            ctx.player.yaw = nyaw;
-            ctx.player.pitch = npitch;
-        }
-    }
-
-    fn run_autoclicker(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.autoclicker_enabled || !ctx.player.attack_pressed {
-            return;
-        }
-        let r = self.next_rand_f32();
-        let cps = self.cfg.autoclicker_min_cps
-            + r * (self.cfg.autoclicker_max_cps - self.cfg.autoclicker_min_cps);
-        let interval = Duration::from_secs_f32(1.0 / cps.max(1.0));
-
-        if self.last_attack.elapsed() >= interval {
-            self.last_attack = Instant::now();
-            self.lmb_clicks.push_back(self.last_attack);
-            ctx.player.swinging = true;
-
-            if self.cfg.autoclicker_jitter > 0.0 {
-                let jx = (self.next_rand_f32() - 0.5) * self.cfg.autoclicker_jitter;
-                let jy = (self.next_rand_f32() - 0.5) * self.cfg.autoclicker_jitter;
-                ctx.player.yaw = RotationUtils::wrap_degrees(ctx.player.yaw + jx);
-                ctx.player.pitch = (ctx.player.pitch + jy).clamp(-90.0, 90.0);
-            }
-
-            if let Some(hit_id) = self.raycast_combat_entity(ctx) {
-                let rot = (ctx.player.yaw, ctx.player.pitch);
-                ctx.send_packet(OutgoingPacket {
-                    packet_id: 0x02,
-                    timestamp: Instant::now(),
-                    pos: None,
-                    rot: Some(rot),
-                    target_entity: Some(hit_id),
-                    raw_bytes: vec![0x02, (hit_id & 0xFF) as u8],
-                });
+        "Velocity" => {
+            if in_row1 && delta != 0.0 {
+                cfg.velocity_horizontal = (cfg.velocity_horizontal + delta * 5.0).clamp(0.0, 100.0);
+            } else if in_row2 && delta != 0.0 {
+                cfg.velocity_vertical = (cfg.velocity_vertical + delta * 5.0).clamp(0.0, 100.0);
             }
         }
-    }
-
-    pub fn raycast_combat_entity(&self, ctx: &WorldContext) -> Option<u32> {
-        let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        let look = RotationUtils::look_vec(ctx.player.yaw, ctx.player.pitch);
-        let max_dist = if self.cfg.reach_enabled {
-            self.cfg.reach_max
-        } else {
-            3.0
-        };
-        let expand = if self.cfg.hitbox_enabled {
-            self.cfg.hitbox_expand
-        } else {
-            0.0
-        };
-
-        let mut closest: Option<(u32, f64)> = None;
-        for e in &ctx.entities {
-            if !self.is_valid_combat_target(ctx, e) {
-                continue;
-            }
-            let pos = self.effective_target_pos(e, eye);
-            let box_aabb = Aabb::from_entity(pos, e.width, e.height, expand);
-            if let Some(t) = box_aabb.intersects_ray(eye, look, max_dist) {
-                if closest.map_or(true, |(_, best_t)| t < best_t) {
-                    closest = Some((e.id, t));
-                }
+        "Scaffold" => {
+            if in_row1 && x < mid_x {
+                cfg.scaffold_sprint = cfg.scaffold_sprint.next();
+            } else if in_row1 && x >= mid_x {
+                cfg.scaffold_schedule = cfg.scaffold_schedule.next();
+            } else if in_row2 && x < mid_x {
+                cfg.scaffold_rotation = cfg.scaffold_rotation.next();
+            } else if in_row2 && x >= mid_x {
+                cfg.scaffold_tower = !cfg.scaffold_tower;
             }
         }
-        closest.map(|(id, _)| id)
-    }
-
-    fn run_anti_fireball(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.anti_fireball_enabled {
-            return;
-        }
-        let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        let found_fb = ctx
-            .entities
-            .iter()
-            .find(|e| e.is_fireball && eye.dist(e.pos) <= 4.8)
-            .map(|fb| (fb.id, fb.pos));
-
-        if let Some((fb_id, fb_pos)) = found_fb {
-            let rot = RotationUtils::rotations_to_vec(eye, fb_pos);
-            ctx.send_packet(OutgoingPacket {
-                packet_id: 0x02,
-                timestamp: Instant::now(),
-                pos: Some(fb_pos),
-                rot: Some(rot),
-                target_entity: Some(fb_id),
-                raw_bytes: vec![0x02, (fb_id & 0xFF) as u8],
-            });
-        }
-    }
-
-    fn run_rod_aimbot(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.rod_aimbot_enabled {
-            return;
-        }
-        let holding_rod = ctx.player.inventory[ctx.player.hotbar_slot]
-            .as_ref()
-            .map_or(false, |i| i.category == ItemCategory::FishingRod);
-        if !holding_rod || !ctx.player.use_pressed {
-            return;
-        }
-
-        let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        let target_info = ctx
-            .entities
-            .iter()
-            .filter(|e| self.is_valid_combat_target(ctx, e) && eye.dist(e.pos) <= 10.0)
-            .min_by(|a, b| eye.dist_sq(a.pos).partial_cmp(&eye.dist_sq(b.pos)).unwrap())
-            .map(|t| (t.pos, t.vel, t.height));
-
-        if let Some((tpos, tvel, theight)) = target_info {
-            let dist = eye.dist(tpos);
-            let flight_ticks = (dist / 1.4).clamp(1.0, 15.0);
-            let predicted = Vec3::new(
-                tpos.x + tvel.x * flight_ticks,
-                tpos.y + theight * 0.7 + (dist * 0.04),
-                tpos.z + tvel.z * flight_ticks,
-            );
-            let (ryaw, rpitch) = RotationUtils::rotations_to_vec(eye, predicted);
-            ctx.player.server_yaw = ryaw;
-            ctx.player.server_pitch = rpitch;
-        }
-    }
-
-    fn run_tp_aura(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.tp_aura_enabled || ctx.tick_counter % 5 != 0 {
-            return;
-        }
-        let origin = ctx.player.pos;
-        let found_target = ctx
-            .entities
-            .iter()
-            .filter(|e| {
-                self.is_valid_combat_target(ctx, e) && origin.dist(e.pos) <= self.cfg.tp_aura_range
-            })
-            .min_by(|a, b| origin.dist_sq(a.pos).partial_cmp(&origin.dist_sq(b.pos)).unwrap())
-            .map(|t| (t.id, t.pos));
-
-        if let Some((target_id, target_pos)) = found_target {
-            let steps = (origin.dist(target_pos) / 3.5).ceil().max(1.0) as usize;
-            for i in 1..=steps {
-                let frac = i as f64 / steps as f64;
-                let step_pos = origin.add(target_pos.sub(origin).scale(frac));
-                ctx.send_packet(OutgoingPacket {
-                    packet_id: 0x04, // C04 PlayerPosition
-                    timestamp: Instant::now(),
-                    pos: Some(step_pos),
-                    rot: None,
-                    target_entity: None,
-                    raw_bytes: vec![0x04],
-                });
-            }
-            ctx.send_packet(OutgoingPacket {
-                packet_id: 0x02,
-                timestamp: Instant::now(),
-                pos: Some(target_pos),
-                rot: None,
-                target_entity: Some(target_id),
-                raw_bytes: vec![0x02],
-            });
-        }
-    }
-
-    fn run_wtap_and_jump_reset(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.wtap_enabled && ctx.player.swinging && ctx.player.sprinting {
-            let eid = ctx.player.entity_id;
-            ctx.send_packet(OutgoingPacket {
-                packet_id: 0x0B,
-                timestamp: Instant::now(),
-                pos: None,
-                rot: None,
-                target_entity: Some(eid),
-                raw_bytes: vec![0x0B, 0x05, 0x04],
-            });
-        }
-
-        if self.cfg.jump_reset_enabled && ctx.player.hurt_time == 9 && ctx.player.on_ground {
-            ctx.player.vel.y = 0.42;
-            ctx.player.on_ground = false;
-        }
-
-        if self.cfg.velocity_enabled && ctx.player.hurt_time == 9 {
-            let roll = (self.next_rand_f32() * 100.0) as u8;
-            if roll <= self.cfg.velocity_chance {
-                let h = (self.cfg.velocity_horizontal / 100.0) as f64;
-                let v = (self.cfg.velocity_vertical / 100.0) as f64;
-                ctx.player.vel.x *= h;
-                ctx.player.vel.z *= h;
-                ctx.player.vel.y *= v;
+        "Fly" => {
+            if in_row1 && x < mid_x {
+                cfg.fly_mode = cfg.fly_mode.next();
+            } else if in_row2 && delta != 0.0 {
+                cfg.fly_speed = (cfg.fly_speed + f64::from(delta) * 0.2).clamp(0.2, 5.0);
             }
         }
-    }
-
-    // ========================================================================
-    // MOVEMENT MODULES
-    // ========================================================================
-
-    fn run_timer(&mut self, ctx: &mut WorldContext) {
-        ctx.player.timer_speed = if self.cfg.timer_enabled {
-            self.cfg.timer_value.clamp(0.1, 10.0)
-        } else {
-            1.0
-        };
-    }
-
-    fn run_sprint(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.sprint_enabled {
-            return;
-        }
-        if self.cfg.sprint_omni {
-            ctx.player.sprinting = MoveUtil::is_moving(&ctx.player);
-        } else if ctx.player.move_forward > 0.0 {
-            ctx.player.sprinting = true;
-        }
-    }
-
-    fn run_fly(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.fly_enabled {
-            return;
-        }
-        match self.cfg.fly_mode {
-            FlyMode::Vanilla | FlyMode::Motion => {
-                MoveUtil::strafe(&mut ctx.player, self.cfg.fly_speed);
-                ctx.player.vel.y = if ctx.player.jump_pressed {
-                    self.cfg.fly_speed * 0.6
-                } else if ctx.player.sneaking {
-                    -self.cfg.fly_speed * 0.6
-                } else {
-                    0.0
-                };
-            }
-            FlyMode::Glide => {
-                MoveUtil::strafe(&mut ctx.player, self.cfg.fly_speed * 0.75);
-                if ctx.player.vel.y < -0.05 {
-                    ctx.player.vel.y = -0.05;
-                }
-            }
-            FlyMode::AirWalk => {
-                ctx.player.vel.y = 0.0;
-                ctx.player.on_ground = true;
-                MoveUtil::strafe(&mut ctx.player, self.cfg.fly_speed * 0.5);
+        "Speed" => {
+            if in_row1 && x < mid_x {
+                cfg.speed_mode = cfg.speed_mode.next();
+            } else if in_row2 && delta != 0.0 {
+                cfg.speed_multiplier = (cfg.speed_multiplier + f64::from(delta) * 0.05).clamp(1.0, 3.0);
             }
         }
-    }
-
-    fn run_speed_and_bhop(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.speed_enabled && !self.cfg.bhop_enabled {
-            return;
-        }
-        if !MoveUtil::is_moving(&ctx.player) {
-            return;
-        }
-
-        let base_speed = 0.2873 * self.cfg.speed_multiplier;
-        match self.cfg.speed_mode {
-            SpeedMode::Strafe => {
-                if ctx.player.on_ground && self.cfg.bhop_enabled {
-                    ctx.player.vel.y = 0.42;
-                    ctx.player.on_ground = false;
-                }
-                MoveUtil::strafe(&mut ctx.player, base_speed);
-            }
-            SpeedMode::BHop => {
-                if ctx.player.on_ground {
-                    ctx.player.vel.y = 0.42;
-                    ctx.player.on_ground = false;
-                    MoveUtil::strafe(&mut ctx.player, base_speed * 1.15);
-                } else {
-                    MoveUtil::strafe(&mut ctx.player, base_speed * 0.98);
-                }
-            }
-            SpeedMode::HypixelLowHop => {
-                if ctx.player.on_ground {
-                    ctx.player.vel.y = 0.40;
-                    ctx.player.on_ground = false;
-                    MoveUtil::strafe(&mut ctx.player, 0.46);
-                } else if self.air_ticks == 4 {
-                    ctx.player.vel.y = -0.098;
-                }
-            }
-            SpeedMode::GroundBoost => {
-                if ctx.player.on_ground {
-                    MoveUtil::strafe(&mut ctx.player, base_speed * 1.25);
-                }
+        "Timer" => {
+            if in_row1 && delta != 0.0 {
+                cfg.timer_value = (cfg.timer_value + delta * 0.05).clamp(0.5, 5.0);
             }
         }
-    }
-
-    fn run_long_jump(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.long_jump_enabled || !MoveUtil::is_moving(&ctx.player) {
-            return;
-        }
-        if ctx.player.on_ground {
-            ctx.player.vel.y = 0.44;
-            ctx.player.on_ground = false;
-            MoveUtil::strafe(&mut ctx.player, 0.48 * self.cfg.long_jump_boost);
-        } else if self.air_ticks <= 10 {
-            ctx.player.vel.y += 0.022;
-        }
-    }
-
-    fn run_step_and_dolphin(&mut self, ctx: &mut WorldContext) {
-        ctx.player.step_height = if self.cfg.step_enabled {
-            self.cfg.step_height
-        } else {
-            0.6
-        };
-
-        let feet_block = ctx.get_block(BlockPos::from_vec3(ctx.player.pos));
-        if self.cfg.dolphin_enabled && feet_block == BlockType::Liquid {
-            ctx.player.vel.y = 0.12;
-            MoveUtil::strafe(&mut ctx.player, 0.36);
-        }
-    }
-
-    fn run_instant_stop(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.instant_stop_enabled
-            && !MoveUtil::is_moving(&ctx.player)
-            && ctx.player.on_ground
-        {
-            ctx.player.vel.x = 0.0;
-            ctx.player.vel.z = 0.0;
-        }
-    }
-
-    pub fn trigger_vclip(&mut self, ctx: &mut WorldContext) {
-        ctx.player.pos.y += self.cfg.vclip_distance;
-        let new_pos = ctx.player.pos;
-        ctx.send_packet(OutgoingPacket {
-            packet_id: 0x04,
-            timestamp: Instant::now(),
-            pos: Some(new_pos),
-            rot: None,
-            target_entity: None,
-            raw_bytes: vec![0x04],
-        });
-    }
-
-    // ========================================================================
-    // PLAYER & INVENTORY MODULES
-    // ========================================================================
-
-    fn run_delay_remover(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.delay_remover_enabled {
-            ctx.player.swinging = false;
-        }
-    }
-
-    fn run_fast_place(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.fast_place_enabled {
-            ctx.player.right_click_delay = self.cfg.fast_place_delay;
-        }
-    }
-
-    fn run_nofall(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.nofall_enabled && ctx.player.fall_distance > 2.75 {
-            let ppos = ctx.player.pos;
-            ctx.send_packet(OutgoingPacket {
-                packet_id: 0x03,
-                timestamp: Instant::now(),
-                pos: Some(ppos),
-                rot: None,
-                target_entity: None,
-                raw_bytes: vec![0x03, 0x01],
-            });
-            ctx.player.fall_distance = 0.0;
-        }
-    }
-
-    fn run_safewalk_and_bridge_assist(&mut self, ctx: &mut WorldContext) {
-        let mut over_air = false;
-        let next_pos = Vec3::new(
-            ctx.player.pos.x + ctx.player.vel.x,
-            ctx.player.pos.y - 0.5,
-            ctx.player.pos.z + ctx.player.vel.z,
-        );
-        if ctx.is_air(BlockPos::from_vec3(next_pos)) && ctx.player.on_ground {
-            over_air = true;
-        }
-
-        if self.cfg.safewalk_enabled && over_air {
-            ctx.player.vel.x = 0.0;
-            ctx.player.vel.z = 0.0;
-        }
-
-        if self.cfg.bridge_assist_enabled {
-            let block_center = BlockPos::from_vec3(ctx.player.pos).center();
-            let edge_dist = ctx.player.pos.horiz_dist(block_center);
-            ctx.player.sneaking = over_air && edge_dist >= (0.5 - self.cfg.bridge_assist_edge_dist);
-        }
-    }
-
-    fn run_water_bucket_mlg(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.water_bucket_enabled || ctx.player.fall_distance < 4.0 {
-            return;
-        }
-        let below = BlockPos::from_vec3(Vec3::new(
-            ctx.player.pos.x,
-            ctx.player.pos.y - 2.0,
-            ctx.player.pos.z,
-        ));
-        if ctx.is_solid(below) {
-            if let Some(slot) = ctx.player.inventory[0..9].iter().position(|s| {
-                s.as_ref()
-                    .map_or(false, |i| i.category == ItemCategory::WaterBucket)
-            }) {
-                ctx.player.hotbar_slot = slot;
-                ctx.player.server_pitch = 90.0;
-                let yaw = ctx.player.yaw;
-                ctx.send_packet(OutgoingPacket {
-                    packet_id: 0x08,
-                    timestamp: Instant::now(),
-                    pos: Some(below.center()),
-                    rot: Some((yaw, 90.0)),
-                    target_entity: None,
-                    raw_bytes: vec![0x08],
-                });
-                ctx.player.fall_distance = 0.0;
+        "AutoClicker" => {
+            if in_row1 && delta != 0.0 {
+                cfg.autoclicker_min_cps = (cfg.autoclicker_min_cps + delta).clamp(1.0, 25.0);
+            } else if in_row2 && delta != 0.0 {
+                cfg.autoclicker_max_cps = (cfg.autoclicker_max_cps + delta).clamp(cfg.autoclicker_min_cps, 30.0);
             }
         }
-    }
-
-    fn run_auto_tool(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.auto_tool_enabled || !ctx.player.attack_pressed {
-            return;
-        }
-        if self.current_target_id.is_some() {
-            if let Some((best_slot, _)) = ctx.player.inventory[0..9]
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, item)| {
-                    item.as_ref().and_then(|it| {
-                        if it.category == ItemCategory::Sword {
-                            Some((idx, it.damage_score))
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            {
-                ctx.player.hotbar_slot = best_slot;
+        "HitBox" => {
+            if in_row1 && delta != 0.0 {
+                cfg.hitbox_expand = (cfg.hitbox_expand + f64::from(delta) * 0.05).clamp(0.0, 1.0);
             }
         }
-    }
-
-    fn run_chest_stealer_and_inv_manager(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.chest_stealer_enabled
-            && !ctx.player.open_chest_slots.is_empty()
-            && ctx.tick_counter % self.cfg.chest_stealer_delay_ticks.max(1) == 0
-        {
-            for chest_slot in &mut ctx.player.open_chest_slots {
-                if let Some(item) = chest_slot.take() {
-                    if item.category != ItemCategory::Trash {
-                        if let Some(empty_slot) =
-                            ctx.player.inventory.iter_mut().find(|s| s.is_none())
-                        {
-                            *empty_slot = Some(item);
-                            break;
-                        }
-                    }
-                }
+        "BackTrack" => {
+            if in_row1 && delta != 0.0 {
+                cfg.backtrack_delay_ms = (cfg.backtrack_delay_ms as i64 + (delta as i64) * 25).clamp(25, 600) as u64;
             }
         }
-
-        if self.cfg.inv_manager_enabled && ctx.tick_counter % 4 == 0 {
-            for slot in &mut ctx.player.inventory {
-                if slot
-                    .as_ref()
-                    .map_or(false, |i| i.category == ItemCategory::Trash)
-                {
-                    *slot = None;
-                }
+        "SumoFences" => {
+            if in_row1 && delta != 0.0 {
+                cfg.sumo_fences_height = (cfg.sumo_fences_height + delta * 0.5).clamp(1.0, 4.0);
             }
         }
-    }
-
-    fn run_blink_and_fakelag(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.blink_enabled {
-            while let Some(pkt) = ctx.outgoing_queue.pop_front() {
-                self.blink_buffer.push_back(pkt);
+        _ => {
+            if in_row1 {
+                cfg.toggle(cfg.selected_module);
             }
-            return;
-        }
-
-        if self.cfg.fake_lag_enabled {
-            let max_hold = Duration::from_millis(self.cfg.fake_lag_interval_ms);
-            while let Some(pkt) = ctx.outgoing_queue.pop_front() {
-                self.blink_buffer.push_back(pkt);
-            }
-            if self
-                .blink_buffer
-                .front()
-                .map_or(false, |first| first.timestamp.elapsed() >= max_hold)
-            {
-                while let Some(pkt) = self.blink_buffer.pop_front() {
-                    ctx.outgoing_queue.push_back(pkt);
-                }
-            }
-        } else {
-            while let Some(pkt) = self.blink_buffer.pop_front() {
-                ctx.outgoing_queue.push_back(pkt);
-            }
-        }
-    }
-
-    fn run_block_in(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.block_in_enabled {
-            return;
-        }
-        let base = BlockPos::from_vec3(ctx.player.pos);
-        let offsets = [
-            BlockPos::new(base.x + 1, base.y, base.z),
-            BlockPos::new(base.x - 1, base.y, base.z),
-            BlockPos::new(base.x, base.y, base.z + 1),
-            BlockPos::new(base.x, base.y, base.z - 1),
-            BlockPos::new(base.x, base.y + 1, base.z + 1),
-            BlockPos::new(base.x, base.y + 1, base.z - 1),
-            BlockPos::new(base.x + 1, base.y + 1, base.z),
-            BlockPos::new(base.x - 1, base.y + 1, base.z),
-            BlockPos::new(base.x, base.y + 2, base.z),
-        ];
-        for target_block in offsets {
-            if ctx.is_air(target_block) {
-                ctx.blocks.insert(target_block, BlockType::Solid);
-                let rot = RotationUtils::rotations_to_vec(ctx.player.pos, target_block.center());
-                ctx.send_packet(OutgoingPacket {
-                    packet_id: 0x08,
-                    timestamp: Instant::now(),
-                    pos: Some(target_block.center()),
-                    rot: Some(rot),
-                    target_entity: None,
-                    raw_bytes: vec![0x08],
-                });
-                break;
-            }
-        }
-    }
-
-    fn run_freecam(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.freecam_enabled {
-            if self.freecam_anchor.is_none() {
-                self.freecam_anchor = Some(ctx.player.pos);
-            }
-            MoveUtil::strafe(&mut ctx.player, self.cfg.freecam_speed);
-        } else if let Some(anchor) = self.freecam_anchor.take() {
-            ctx.player.pos = anchor;
-        }
-    }
-
-    // ========================================================================
-    // WORLD MODULES: SCAFFOLD (Rotations + Schedules + Sprints) & BEDAURA
-    // ========================================================================
-
-    fn run_scaffold(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.scaffold_enabled {
-            return;
-        }
-
-        if let Some(block_slot) = ctx.player.inventory[0..9].iter().position(|s| {
-            s.as_ref()
-                .map_or(false, |i| i.category == ItemCategory::Block && i.count > 0)
-        }) {
-            ctx.player.hotbar_slot = block_slot;
-        }
-
-        match self.cfg.scaffold_sprint {
-            ScaffoldSprintMode::Disabled => ctx.player.sprinting = false,
-            ScaffoldSprintMode::Vanilla | ScaffoldSprintMode::Legit => ctx.player.sprinting = true,
-            ScaffoldSprintMode::HypixelJump | ScaffoldSprintMode::JumpA => {
-                ctx.player.sprinting = true;
-                if ctx.player.on_ground && MoveUtil::is_moving(&ctx.player) {
-                    ctx.player.vel.y = 0.42;
-                    ctx.player.on_ground = false;
-                }
-            }
-            ScaffoldSprintMode::Edge | ScaffoldSprintMode::OldIntave => {
-                ctx.player.sprinting = ctx.player.on_ground;
-            }
-            ScaffoldSprintMode::Sneak => {
-                ctx.player.sneaking = ctx.tick_counter % 3 == 0;
-            }
-        }
-
-        if self.cfg.scaffold_tower && ctx.player.jump_pressed && !MoveUtil::is_moving(&ctx.player) {
-            ctx.player.vel.y = 0.42;
-        }
-
-        let can_place = match self.cfg.scaffold_schedule {
-            ScaffoldScheduleMode::Normal => true,
-            ScaffoldScheduleMode::SimpleTelly => self.air_ticks == 0 || self.air_ticks >= 2,
-            ScaffoldScheduleMode::Telly => self.air_ticks == 0 || self.air_ticks >= 3,
-        };
-        if !can_place {
-            return;
-        }
-
-        let under = BlockPos::from_vec3(Vec3::new(
-            ctx.player.pos.x,
-            ctx.player.pos.y - 1.0,
-            ctx.player.pos.z,
-        ));
-        if !ctx.is_air(under) {
-            return;
-        }
-
-        let faces = [
-            BlockFace::Down,
-            BlockFace::North,
-            BlockFace::South,
-            BlockFace::West,
-            BlockFace::East,
-        ];
-        for face in faces {
-            let neighbor = under.offset(face);
-            if ctx.is_solid(neighbor) {
-                let place_face = face.opposite();
-                let hit_vec = neighbor.center();
-
-                let (ryaw, rpitch) = match self.cfg.scaffold_rotation {
-                    ScaffoldRotationMode::Strict | ScaffoldRotationMode::Precise => {
-                        RotationUtils::rotations_to_vec(
-                            Vec3::new(
-                                ctx.player.pos.x,
-                                ctx.player.pos.y + 1.62,
-                                ctx.player.pos.z,
-                            ),
-                            hit_vec,
-                        )
-                    }
-                    ScaffoldRotationMode::Backwards => {
-                        (RotationUtils::wrap_degrees(ctx.player.yaw + 180.0), 79.5)
-                    }
-                    ScaffoldRotationMode::Constant => {
-                        (RotationUtils::wrap_degrees(ctx.player.yaw + 135.0), 77.0)
-                    }
-                    ScaffoldRotationMode::None => (ctx.player.yaw, ctx.player.pitch),
-                };
-
-                ctx.player.server_yaw = ryaw;
-                ctx.player.server_pitch = rpitch;
-                ctx.blocks.insert(under, BlockType::Wool);
-                this_place_packet(ctx, neighbor, place_face, (ryaw, rpitch));
-                break;
-            }
-        }
-    }
-
-    fn run_bed_aura(&mut self, ctx: &mut WorldContext) {
-        if !self.cfg.bed_aura_enabled {
-            return;
-        }
-        let p = BlockPos::from_vec3(ctx.player.pos);
-        let r = self.cfg.bed_aura_range.ceil() as i32;
-        for dx in -r..=r {
-            for dy in -r..=r {
-                for dz in -r..=r {
-                    let check = BlockPos::new(p.x + dx, p.y + dy, p.z + dz);
-                    if ctx.get_block(check) == BlockType::Bed
-                        && ctx.player.pos.dist(check.center()) <= self.cfg.bed_aura_range
-                    {
-                        let rot = RotationUtils::rotations_to_vec(ctx.player.pos, check.center());
-                        ctx.player.server_yaw = rot.0;
-                        ctx.player.server_pitch = rot.1;
-                        ctx.send_packet(OutgoingPacket {
-                            packet_id: 0x07,
-                            timestamp: Instant::now(),
-                            pos: Some(check.center()),
-                            rot: Some(rot),
-                            target_entity: None,
-                            raw_bytes: vec![0x07, 0x00, 0x02],
-                        });
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    // ========================================================================
-    // MINIGAMES & RENDER MODULES (HUD, ESP, Trajectories, Keystrokes)
-    // ========================================================================
-
-    fn run_minigame_helpers(&mut self, ctx: &mut WorldContext) {
-        if self.cfg.murder_mystery_detector {
-            for e in &ctx.entities {
-                if e.is_player && e.held_item == Some(ItemCategory::Sword) {
-                    if !self.murder_suspects.contains(&e.name) {
-                        self.murder_suspects.push(e.name.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    fn run_render_state(&mut self, ctx: &mut WorldContext) {
-        ctx.player.gamma = if self.cfg.fullbright_enabled {
-            100.0
-        } else {
-            1.0
-        };
-
-        if self.cfg.freelook_enabled {
-            if self.freelook_anchor.is_none() {
-                self.freelook_anchor = Some((ctx.player.yaw, ctx.player.pitch));
-            }
-        } else if let Some((ayaw, apitch)) = self.freelook_anchor.take() {
-            ctx.player.camera_yaw = ayaw;
-            ctx.player.camera_pitch = apitch;
-        }
-    }
-
-    fn render_overlays(&mut self, ctx: &mut WorldContext) {
-        ctx.draw_buffer.clear();
-
-        if self.cfg.hud_enabled {
-            ctx.draw_buffer.push(DrawCommand {
-                kind: DrawKind::Text {
-                    x: 8.0,
-                    y: 8.0,
-                    text: String::from("Raven bS+ [Rust iOS]"),
-                    scale: 1.2,
-                },
-                color_rgba: 0x9B59B6FF,
-            });
-        }
-
-        if self.cfg.keystrokes_enabled {
-            let now = Instant::now();
-            self.lmb_clicks
-                .retain(|t| now.duration_since(*t) <= Duration::from_secs(1));
-            self.rmb_clicks
-                .retain(|t| now.duration_since(*t) <= Duration::from_secs(1));
-
-            let cps_text = format!(
-                "LMB: {} CPS | RMB: {} CPS",
-                self.lmb_clicks.len(),
-                self.rmb_clicks.len()
-            );
-            ctx.draw_buffer.push(DrawCommand {
-                kind: DrawKind::Rect {
-                    x: 10.0,
-                    y: 120.0,
-                    w: 140.0,
-                    h: 26.0,
-                    radius: 4.0,
-                },
-                color_rgba: 0x00000099,
-            });
-            ctx.draw_buffer.push(DrawCommand {
-                kind: DrawKind::Text {
-                    x: 16.0,
-                    y: 126.0,
-                    text: cps_text,
-                    scale: 1.0,
-                },
-                color_rgba: 0xFFFFFFFF,
-            });
-        }
-
-        let eye = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.62, ctx.player.pos.z);
-        for e in &ctx.entities {
-            if e.id == ctx.player.entity_id {
-                continue;
-            }
-            let draw_esp = (e.is_player && self.cfg.player_esp_enabled)
-                || (e.is_mob && self.cfg.mob_esp_enabled)
-                || (e.is_item && self.cfg.item_esp_enabled);
-
-            if draw_esp {
-                let aabb = Aabb::from_entity(e.pos, e.width, e.height, 0.05);
-                ctx.draw_buffer.push(DrawCommand {
-                    kind: DrawKind::Box3D {
-                        aabb,
-                        outline_only: !self.cfg.chams_enabled,
-                    },
-                    color_rgba: if Some(e.id) == self.current_target_id {
-                        0xFF3B30FF
-                    } else {
-                        0x00E5FFFF
-                    },
-                });
-
-                if self.cfg.tracers_enabled && e.is_player {
-                    ctx.draw_buffer.push(DrawCommand {
-                        kind: DrawKind::Line3D {
-                            start: eye,
-                            end: e.pos,
-                            width: 1.5,
-                        },
-                        color_rgba: 0x00E5FFCC,
-                    });
-                }
-            }
-        }
-
-        if self.cfg.target_hud_enabled {
-            if let Some(tid) = self.current_target_id {
-                if let Some(target) = ctx.entities.iter().find(|e| e.id == tid) {
-                    let display_name = if self.cfg.name_hider_enabled {
-                        &self.cfg.fake_nick
-                    } else {
-                        &target.name
-                    };
-                    let hud_label = format!("{} ({:.1} HP)", display_name, target.health);
-                    ctx.draw_buffer.push(DrawCommand {
-                        kind: DrawKind::Rect {
-                            x: 420.0,
-                            y: 320.0,
-                            w: 180.0,
-                            h: 52.0,
-                            radius: 6.0,
-                        },
-                        color_rgba: 0x14141ECC,
-                    });
-                    ctx.draw_buffer.push(DrawCommand {
-                        kind: DrawKind::Text {
-                            x: 428.0,
-                            y: 328.0,
-                            text: hud_label,
-                            scale: 1.0,
-                        },
-                        color_rgba: 0x2ECC71FF,
-                    });
-                }
-            }
-        }
-
-        if self.cfg.trajectories_enabled {
-            self.render_projectile_trajectory(ctx);
-        }
-    }
-
-    fn render_projectile_trajectory(&self, ctx: &mut WorldContext) {
-        let mut pos = Vec3::new(ctx.player.pos.x, ctx.player.pos.y + 1.52, ctx.player.pos.z);
-        let mut vel = RotationUtils::look_vec(ctx.player.yaw, ctx.player.pitch).scale(1.5);
-        let gravity = 0.03;
-        let drag = 0.99;
-
-        for _ in 0..45 {
-            let next_pos = pos.add(vel);
-            ctx.draw_buffer.push(DrawCommand {
-                kind: DrawKind::Line3D {
-                    start: pos,
-                    end: next_pos,
-                    width: 2.0,
-                },
-                color_rgba: 0x2ECC71FF,
-            });
-            if ctx.is_solid(BlockPos::from_vec3(next_pos)) {
-                break;
-            }
-            pos = next_pos;
-            vel = vel.scale(drag);
-            vel.y -= gravity;
         }
     }
 }
 
-#[inline]
-fn this_place_packet(
-    ctx: &mut WorldContext,
-    support: BlockPos,
-    face: BlockFace,
-    rot: (f32, f32),
+/// Draws the in-game Raven HUD, floating `[ R ]` button, and full 7-column Raven bS+ ClickGUI
+pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
+    let Ok(raven) = global_raven().lock() else {
+        return;
+    };
+    let cfg = &raven.cfg;
+
+    // 1. In-game HUD ArrayList & Floating `[ R ]` button when ClickGUI is closed
+    if !cfg.clickgui_open {
+        if cfg.hud_enabled {
+            batch.text(
+                atlas,
+                "Raven bS+ v1.3.3",
+                6.0,
+                6.0,
+                rgba(168, 85, 247, 255),
+                true,
+            );
+            let mut ay = 18.0;
+            for cat in 0..7 {
+                for &m in category_modules(cat) {
+                    if m != "HUD" && m != "Keystrokes" && cfg.is_enabled(m) {
+                        let tw = HudBatch::text_width(atlas, m);
+                        batch.fill(
+                            atlas,
+                            batch.width - tw - 8.0,
+                            ay - 1.0,
+                            tw + 6.0,
+                            11.0,
+                            rgba(15, 15, 22, 165),
+                        );
+                        batch.text(
+                            atlas,
+                            m,
+                            batch.width - tw - 5.0,
+                            ay,
+                            rgba(46, 204, 113, 255),
+                            true,
+                        );
+                        ay += 11.0;
+                    }
+                }
+            }
+        }
+
+        // Draggable Floating `[ R ]` button
+        let (bx, by) = (cfg.float_btn_x, cfg.float_btn_y);
+        batch.fill(atlas, bx, by, 28.0, 22.0, rgba(20, 20, 30, 215));
+        batch.fill(atlas, bx, by, 28.0, 2.0, rgba(168, 85, 247, 255));
+        batch.text(atlas, "[R]", bx + 5.0, by + 7.0, rgba(255, 255, 255, 255), true);
+        return;
+    }
+
+    // 2. Full Raven bS+ ClickGUI Overlay
+    let sw = batch.width;
+    let sh = batch.height;
+    batch.fill_gradient(
+        atlas,
+        (0.0, 0.0, sw, sh),
+        rgba(10, 10, 16, 225),
+        rgba(18, 14, 28, 235),
+    );
+
+    // Top Bar + Left & Right `[ X ]` Close Buttons
+    batch.fill(atlas, 0.0, 0.0, sw, 22.0, rgba(18, 18, 26, 245));
+    batch.fill(atlas, 0.0, 21.0, sw, 1.0, rgba(168, 85, 247, 255));
+
+    // Top-Left `[ X ]` Close Button
+    batch.fill(atlas, 4.0, 3.0, 26.0, 16.0, rgba(231, 76, 60, 240));
+    batch.text(atlas, "X", 14.0, 7.0, rgba(255, 255, 255, 255), true);
+
+    // Top-Right `[ X ]` Close Button
+    batch.fill(atlas, sw - 30.0, 3.0, 26.0, 16.0, rgba(231, 76, 60, 240));
+    batch.text(atlas, "X", sw - 20.0, 7.0, rgba(255, 255, 255, 255), true);
+
+    // Center Title
+    let title = "Raven bS+ ClickGUI (Tap Module = ON/OFF | [+] = Settings | [X] = Close)";
+    let tw = HudBatch::text_width(atlas, title);
+    batch.text(
+        atlas,
+        title,
+        ((sw - tw) * 0.5).max(36.0),
+        7.0,
+        rgba(220, 190, 255, 255),
+        true,
+    );
+
+    // 7 Category Columns
+    let margin_x = 6.0;
+    let gap = 3.0;
+    let col_w = ((sw - margin_x * 2.0 - gap * 6.0) / 7.0).max(52.0);
+    let top_y = 26.0;
+    let header_h = 14.0;
+    let row_h = 13.0;
+    let settings_top = (sh - 64.0).max(top_y + header_h + row_h * 5.0);
+    let max_rows = (((settings_top - top_y - header_h - 6.0) / row_h).floor() as usize).max(4);
+
+    for (cat, &cat_name) in CATEGORIES.iter().enumerate() {
+        let cx = margin_x + (cat as f32) * (col_w + gap);
+        let mods = category_modules(cat);
+        let scroll = cfg.col_scroll[cat];
+        let visible_count = mods.len().saturating_sub(scroll).min(max_rows);
+        let col_h = header_h + (visible_count as f32) * row_h + 2.0;
+
+        // Column background & Raven purple header
+        batch.fill(atlas, cx, top_y, col_w, col_h, rgba(16, 16, 24, 230));
+        batch.fill(atlas, cx, top_y, col_w, header_h, rgba(142, 68, 173, 255));
+        batch.text(
+            atlas,
+            cat_name,
+            cx + 3.0,
+            top_y + 3.0,
+            rgba(255, 255, 255, 255),
+            true,
+        );
+        if mods.len() > max_rows {
+            batch.text(
+                atlas,
+                "<>",
+                cx + col_w - 14.0,
+                top_y + 3.0,
+                rgba(230, 230, 250, 255),
+                false,
+            );
+        }
+
+        // Module rows
+        for (idx, &m) in mods.iter().skip(scroll).take(max_rows).enumerate() {
+            let ry = top_y + header_h + (idx as f32) * row_h;
+            let on = cfg.is_enabled(m);
+            let selected = cfg.selected_module == m;
+
+            let bg = if on {
+                rgba(125, 60, 190, 230)
+            } else if selected {
+                rgba(42, 42, 60, 230)
+            } else {
+                rgba(24, 24, 34, 215)
+            };
+            batch.fill(atlas, cx + 1.0, ry, col_w - 2.0, row_h - 1.0, bg);
+
+            let txt_col = if on {
+                rgba(255, 255, 255, 255)
+            } else {
+                rgba(185, 185, 200, 255)
+            };
+            batch.text(atlas, m, cx + 3.0, ry + 2.0, txt_col, on);
+            batch.text(
+                atlas,
+                "+",
+                cx + col_w - 9.0,
+                ry + 2.0,
+                if selected {
+                    rgba(46, 204, 113, 255)
+                } else {
+                    rgba(150, 150, 170, 255)
+                },
+                false,
+            );
+        }
+    }
+
+    // Bottom Settings Inspector Panel for `cfg.selected_module`
+    batch.fill(
+        atlas,
+        margin_x,
+        settings_top,
+        sw - margin_x * 2.0,
+        sh - settings_top - 4.0,
+        rgba(18, 18, 28, 245),
+    );
+    batch.fill(
+        atlas,
+        margin_x,
+        settings_top,
+        sw - margin_x * 2.0,
+        2.0,
+        rgba(46, 204, 113, 255),
+    );
+
+    let sel = cfg.selected_module;
+    let status = if cfg.is_enabled(sel) { "ON" } else { "OFF" };
+    batch.text(
+        atlas,
+        &format!("Settings: {} [{}]", sel, status),
+        margin_x + 6.0,
+        settings_top + 4.0,
+        rgba(46, 204, 113, 255),
+        true,
+    );
+
+    draw_module_settings_rows(batch, atlas, cfg, margin_x + 6.0, settings_top, sw);
+}
+
+fn draw_slider_row(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    x: f32,
+    y: f32,
+    label: &str,
+    val_str: &str,
 ) {
-    ctx.send_packet(OutgoingPacket {
-        packet_id: 0x08,
-        timestamp: Instant::now(),
-        pos: Some(support.center()),
-        rot: Some(rot),
-        target_entity: None,
-        raw_bytes: vec![0x08, face as u8],
-    });
+    batch.text(
+        atlas,
+        &format!("{}: {}", label, val_str),
+        x,
+        y + 3.0,
+        rgba(235, 235, 245, 255),
+        true,
+    );
+    // `[-]` button
+    batch.fill(atlas, x + 124.0, y, 32.0, 14.0, rgba(192, 57, 43, 235));
+    batch.text(atlas, " - ", x + 131.0, y + 3.0, rgba(255, 255, 255, 255), true);
+    // `[+]` button
+    batch.fill(atlas, x + 162.0, y, 32.0, 14.0, rgba(39, 174, 96, 235));
+    batch.text(atlas, " + ", x + 169.0, y + 3.0, rgba(255, 255, 255, 255), true);
+}
+
+fn draw_mode_row(batch: &mut HudBatch, atlas: &HudAtlas, x: f32, y: f32, label: &str, mode: &str) {
+    batch.fill(atlas, x, y, 185.0, 14.0, rgba(52, 73, 94, 235));
+    batch.text(
+        atlas,
+        &format!("{}: [{}] (Tap)", label, mode),
+        x + 4.0,
+        y + 3.0,
+        rgba(255, 255, 255, 255),
+        true,
+    );
+}
+
+fn draw_module_settings_rows(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    cfg: &RavenConfig,
+    x: f32,
+    top: f32,
+    sw: f32,
+) {
+    let r1 = top + 16.0;
+    let r2 = top + 34.0;
+    let mid = sw * 0.5 + 4.0;
+
+    match cfg.selected_module {
+        "FastPlace" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Tick Delay",
+                &format!("{} ticks", cfg.fast_place_delay),
+            );
+            batch.text(
+                atlas,
+                "Blocks Only: ON | Pitch Check: OFF",
+                x,
+                r2 + 3.0,
+                rgba(170, 170, 190, 255),
+                false,
+            );
+        }
+        "Reach" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Reach Min",
+                &format!("{:.1}m", cfg.reach_min),
+            );
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r2,
+                "Reach Max",
+                &format!("{:.1}m", cfg.reach_max),
+            );
+        }
+        "KillAura" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Range",
+                &format!("{:.1}m", cfg.killaura_range),
+            );
+            draw_mode_row(batch, atlas, mid, r1, "Mode", cfg.killaura_mode.as_str());
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r2,
+                "Max CPS",
+                &format!("{:.0}", cfg.killaura_max_cps),
+            );
+        }
+        "Velocity" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Horizontal",
+                &format!("{:.0}%", cfg.velocity_horizontal),
+            );
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r2,
+                "Vertical",
+                &format!("{:.0}%", cfg.velocity_vertical),
+            );
+        }
+        "Scaffold" => {
+            draw_mode_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Sprint",
+                cfg.scaffold_sprint.as_str(),
+            );
+            draw_mode_row(
+                batch,
+                atlas,
+                mid,
+                r1,
+                "Schedule",
+                cfg.scaffold_schedule.as_str(),
+            );
+            draw_mode_row(
+                batch,
+                atlas,
+                x,
+                r2,
+                "Rotation",
+                cfg.scaffold_rotation.as_str(),
+            );
+            draw_mode_row(
+                batch,
+                atlas,
+                mid,
+                r2,
+                "Tower",
+                if cfg.scaffold_tower { "ON" } else { "OFF" },
+            );
+        }
+        "Fly" => {
+            draw_mode_row(batch, atlas, x, r1, "Fly Mode", cfg.fly_mode.as_str());
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r2,
+                "Fly Speed",
+                &format!("{:.1}x", cfg.fly_speed),
+            );
+        }
+        "Speed" => {
+            draw_mode_row(batch, atlas, x, r1, "Speed Mode", cfg.speed_mode.as_str());
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r2,
+                "Multiplier",
+                &format!("{:.2}x", cfg.speed_multiplier),
+            );
+        }
+        "Timer" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Game Speed",
+                &format!("{:.2}x", cfg.timer_value),
+            );
+        }
+        "AutoClicker" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Min CPS",
+                &format!("{:.0}", cfg.autoclicker_min_cps),
+            );
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r2,
+                "Max CPS",
+                &format!("{:.0}", cfg.autoclicker_max_cps),
+            );
+        }
+        "HitBox" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Expand",
+                &format!("+{:.2}m", cfg.hitbox_expand),
+            );
+        }
+        "BackTrack" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Delay",
+                &format!("{} ms", cfg.backtrack_delay_ms),
+            );
+        }
+        "SumoFences" => {
+            draw_slider_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "Fence Height",
+                &format!("{:.1} blocks", cfg.sumo_fences_height),
+            );
+        }
+        _ => {
+            draw_mode_row(
+                batch,
+                atlas,
+                x,
+                r1,
+                "State",
+                if cfg.is_enabled(cfg.selected_module) {
+                    "ENABLED"
+                } else {
+                    "DISABLED"
+                },
+            );
+        }
+    }
 }
