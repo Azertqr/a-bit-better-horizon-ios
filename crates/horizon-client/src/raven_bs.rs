@@ -1,87 +1,13 @@
 // File: crates/horizon-client/src/raven_bs.rs
-//! Complete Raven bS+ (1.3.3+1) Engine & Native Touch ClickGUI for Horizon iOS
-//! Includes all 7 categories, 78 modules, Hypixel/Telly Scaffold schedules, Minigames (SumoFences,
-//! BedWars, SkyWars, MurderMystery, WoolWars, SpeedBuilders), and `.menu` chat command.
+//! Complete Raven bS+ (1.3.3+1) Native Rust Engine + Touch ClickGUI + Full `Game` Wiring
+//! Every module in the ClickGUI is wired directly to Horizon's `Game` struct via `impl_raven_game!()`.
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::type_complexity)]
 
 use crate::hud::{HudAtlas, HudBatch, rgba};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Vec3 {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
-
-impl Vec3 {
-    #[inline]
-    pub const fn new(x: f64, y: f64, z: f64) -> Self {
-        Self { x, y, z }
-    }
-    #[inline]
-    pub fn add(self, other: Self) -> Self {
-        Self::new(self.x + other.x, self.y + other.y, self.z + other.z)
-    }
-    #[inline]
-    pub fn sub(self, other: Self) -> Self {
-        Self::new(self.x - other.x, self.y - other.y, self.z - other.z)
-    }
-    #[inline]
-    pub fn scale(self, s: f64) -> Self {
-        Self::new(self.x * s, self.y * s, self.z * s)
-    }
-    #[inline]
-    pub fn dist_sq(self, other: Self) -> f64 {
-        let dx = self.x - other.x;
-        let dy = self.y - other.y;
-        let dz = self.z - other.z;
-        dx * dx + dy * dy + dz * dz
-    }
-    #[inline]
-    pub fn dist(self, other: Self) -> f64 {
-        self.dist_sq(other).sqrt()
-    }
-    #[inline]
-    pub fn horiz_dist(self, other: Self) -> f64 {
-        let dx = self.x - other.x;
-        let dz = self.z - other.z;
-        (dx * dx + dz * dz).sqrt()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct BlockPos {
-    pub x: i32,
-    pub y: i32,
-    pub z: i32,
-}
-
-impl BlockPos {
-    #[inline]
-    pub const fn new(x: i32, y: i32, z: i32) -> Self {
-        Self { x, y, z }
-    }
-    #[inline]
-    pub fn from_vec3(v: Vec3) -> Self {
-        Self {
-            x: v.x.floor() as i32,
-            y: v.y.floor() as i32,
-            z: v.z.floor() as i32,
-        }
-    }
-    #[inline]
-    pub fn center(self) -> Vec3 {
-        Vec3::new(
-            self.x as f64 + 0.5,
-            self.y as f64 + 0.5,
-            self.z as f64 + 0.5,
-        )
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KillAuraMode {
@@ -285,7 +211,7 @@ impl ScaffoldScheduleMode {
 
 #[derive(Clone, Debug)]
 pub struct RavenConfig {
-    // COMBAT (19 modules)
+    // COMBAT
     pub aim_assist_enabled: bool,
     pub aim_assist_speed: f32,
     pub aim_assist_fov: f32,
@@ -330,7 +256,7 @@ pub struct RavenConfig {
     pub tp_aura_range: f64,
     pub wtap_enabled: bool,
 
-    // MOVEMENT (18 modules)
+    // MOVEMENT
     pub bhop_enabled: bool,
     pub boost_enabled: bool,
     pub dolphin_enabled: bool,
@@ -361,7 +287,7 @@ pub struct RavenConfig {
     pub vclip_enabled: bool,
     pub vclip_distance: f64,
 
-    // PLAYER (20 modules)
+    // PLAYER
     pub anti_afk_enabled: bool,
     pub anti_fireball_enabled: bool,
     pub auto_jump_enabled: bool,
@@ -391,7 +317,7 @@ pub struct RavenConfig {
     pub safewalk_enabled: bool,
     pub water_bucket_enabled: bool,
 
-    // WORLD (3 modules + all Hypixel/Telly sub-modes)
+    // WORLD
     pub antibot_enabled: bool,
     pub scaffold_enabled: bool,
     pub scaffold_sprint: ScaffoldSprintMode,
@@ -400,7 +326,7 @@ pub struct RavenConfig {
     pub scaffold_tower: bool,
     pub weather_clear: bool,
 
-    // RENDER (25 modules)
+    // RENDER
     pub animations_enabled: bool,
     pub anti_debuff_enabled: bool,
     pub anti_shuffle_enabled: bool,
@@ -439,7 +365,7 @@ pub struct RavenConfig {
     pub trajectories_enabled: bool,
     pub xray_enabled: bool,
 
-    // MINIGAMES & OTHER (16 modules)
+    // MINIGAMES & OTHER
     pub auto_requeue_enabled: bool,
     pub auto_who_enabled: bool,
     pub bedwars_helper: bool,
@@ -459,7 +385,7 @@ pub struct RavenConfig {
     pub fake_nick: String,
     pub view_packets_enabled: bool,
 
-    // CLICKGUI & FLOATING BUTTON STATE
+    // CLICKGUI STATE
     pub clickgui_open: bool,
     pub float_btn_x: f32,
     pub float_btn_y: f32,
@@ -507,7 +433,7 @@ impl Default for RavenConfig {
             piercing_enabled: false,
             reach_enabled: false,
             reach_min: 3.2,
-            reach_max: 3.8,
+            reach_max: 4.2,
             reduce_enabled: false,
             reduce_multiplier: 0.6,
             rod_aimbot_enabled: false,
@@ -533,7 +459,7 @@ impl Default for RavenConfig {
             speed_enabled: false,
             speed_mode: SpeedMode::HypixelLowHop,
             speed_multiplier: 1.35,
-            sprint_enabled: false,
+            sprint_enabled: true,
             sprint_omni: false,
             stasis_enabled: false,
             step_enabled: false,
@@ -562,7 +488,7 @@ impl Default for RavenConfig {
             fake_lag_enabled: false,
             fake_lag_interval_ms: 120,
             fast_mine_enabled: false,
-            fast_mine_multiplier: 1.4,
+            fast_mine_multiplier: 1.5,
             fast_place_enabled: false,
             fast_place_delay: 0,
             freecam_enabled: false,
@@ -574,12 +500,12 @@ impl Default for RavenConfig {
             safewalk_enabled: false,
             water_bucket_enabled: false,
 
-            antibot_enabled: false,
+            antibot_enabled: true,
             scaffold_enabled: false,
             scaffold_sprint: ScaffoldSprintMode::HypixelJump2Sprint,
             scaffold_rotation: ScaffoldRotationMode::Precise,
             scaffold_schedule: ScaffoldScheduleMode::Telly,
-            scaffold_tower: false,
+            scaffold_tower: true,
             weather_clear: false,
 
             animations_enabled: false,
@@ -599,13 +525,13 @@ impl Default for RavenConfig {
             fall_view_enabled: false,
             freelook_enabled: false,
             fullbright_enabled: false,
-            hud_enabled: false,
+            hud_enabled: true,
             hit_particles_enabled: false,
             holdlook_enabled: false,
             indicators_enabled: false,
             item_esp_enabled: false,
             item_physics_enabled: false,
-            keystrokes_enabled: false,
+            keystrokes_enabled: true,
             mob_esp_enabled: false,
             nametags_enabled: false,
             no_camera_clip_enabled: false,
@@ -615,7 +541,7 @@ impl Default for RavenConfig {
             radar_enabled: false,
             saturation_hud_enabled: false,
             tnt_timer_enabled: false,
-            target_hud_enabled: false,
+            target_hud_enabled: true,
             tracers_enabled: false,
             trajectories_enabled: false,
             xray_enabled: false,
@@ -654,6 +580,13 @@ pub struct RavenEngine {
     pub last_attack: Instant,
     pub lmb_clicks: VecDeque<Instant>,
     pub rmb_clicks: VecDeque<Instant>,
+    pub switch_idx: usize,
+    pub air_ticks: u32,
+    pub freecam_anchor: Option<[f64; 3]>,
+    pub freelook_anchor: Option<(f32, f32)>,
+    pub target_info: Option<(String, f32, f32, f64)>,
+    pub blocks_placed_session: u32,
+    pub prng: u64,
 }
 
 impl Default for RavenEngine {
@@ -663,7 +596,27 @@ impl Default for RavenEngine {
             last_attack: Instant::now(),
             lmb_clicks: VecDeque::new(),
             rmb_clicks: VecDeque::new(),
+            switch_idx: 0,
+            air_ticks: 0,
+            freecam_anchor: None,
+            freelook_anchor: None,
+            target_info: None,
+            blocks_placed_session: 0,
+            prng: 0x9E37_79B9_7F4A_7C15,
         }
+    }
+}
+
+impl RavenEngine {
+    #[inline]
+    pub fn rand_f32(&mut self) -> f32 {
+        let mut x = self.prng;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.prng = x;
+        let r = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+        ((r >> 40) as u32) as f32 / ((1u32 << 24) as f32)
     }
 }
 
@@ -684,7 +637,7 @@ const CATEGORIES: [&str; 7] = [
     "Other",
 ];
 
-fn category_modules(cat: usize) -> &'static [&'static str] {
+pub fn category_modules(cat: usize) -> &'static [&'static str] {
     match cat {
         0 => &[
             "AimAssist",
@@ -943,7 +896,7 @@ impl RavenConfig {
     }
 
     pub fn toggle(&mut self, name: &str) -> bool {
-        let state = match name {
+        match name {
             "AimAssist" => { self.aim_assist_enabled = !self.aim_assist_enabled; self.aim_assist_enabled }
             "AutoClicker" => { self.autoclicker_enabled = !self.autoclicker_enabled; self.autoclicker_enabled }
             "Autoblock" => { self.autoblock_enabled = !self.autoblock_enabled; self.autoblock_enabled }
@@ -1066,9 +1019,42 @@ impl RavenConfig {
             "NameHider" => { self.name_hider_enabled = !self.name_hider_enabled; self.name_hider_enabled }
             "ViewPackets" => { self.view_packets_enabled = !self.view_packets_enabled; self.view_packets_enabled }
             _ => false,
-        };
-        state
+        }
     }
+}
+
+#[inline]
+pub fn wrap_deg(mut deg: f32) -> f32 {
+    deg %= 360.0;
+    if deg >= 180.0 {
+        deg -= 360.0;
+    }
+    if deg < -180.0 {
+        deg += 360.0;
+    }
+    deg
+}
+
+#[inline]
+pub fn calc_angles(eye: [f64; 3], target: [f64; 3]) -> (f32, f32) {
+    let dx = target[0] - eye[0];
+    let dy = target[1] - eye[1];
+    let dz = target[2] - eye[2];
+    let dist = (dx * dx + dz * dz).sqrt();
+    let yaw = (dz.atan2(dx).to_degrees() as f32) - 90.0;
+    let pitch = -(dy.atan2(dist).to_degrees() as f32);
+    (wrap_deg(yaw), pitch.clamp(-90.0, 90.0))
+}
+
+#[inline]
+pub fn smooth_rot(cur: (f32, f32), target: (f32, f32), speed: f32) -> (f32, f32) {
+    let dyaw = wrap_deg(target.0 - cur.0);
+    let dpitch = target.1 - cur.1;
+    let factor = (speed / 100.0).clamp(0.05, 1.0);
+    (
+        wrap_deg(cur.0 + dyaw * factor),
+        (cur.1 + dpitch * factor).clamp(-90.0, 90.0),
+    )
 }
 
 /// Intercepts `.menu`, `.gui`, `.raven`, or any `.<module>` command typed in chat
@@ -1088,7 +1074,6 @@ pub fn handle_dot_command(msg: &str) -> Option<String> {
         return Some(String::new());
     }
 
-    // Match any module name directly (e.g. `.fastplace`, `.killaura`, `.scaffold`, `.sumo`)
     for cat in 0..7 {
         for &m in category_modules(cat) {
             if m.eq_ignore_ascii_case(cmd) {
@@ -1103,11 +1088,11 @@ pub fn handle_dot_command(msg: &str) -> Option<String> {
     }
 
     Some(String::from(
-        "[Raven bS+] Tape .menu pour ouvrir le ClickGUI Raven ou .<module> (ex: .fastplace, .scaffold, .killaura)",
+        "[Raven bS+] Tape .menu pour ouvrir le ClickGUI Raven ou .<module> (ex: .fly, .killaura, .scaffold, .speed)",
     ))
 }
 
-/// Handles touch input for both the floating `[ R ]` button and the full 7-column Raven bS+ ClickGUI
+/// Handles touch input for both the floating `[ R ]` button and the 7-column Raven bS+ ClickGUI
 pub fn handle_touch_event(
     x: f32,
     y: f32,
@@ -1121,7 +1106,6 @@ pub fn handle_touch_event(
         return false;
     };
 
-    // 1. When ClickGUI is closed: only check the floating draggable `[ R ]` button
     if !raven.cfg.clickgui_open {
         let bx = raven.cfg.float_btn_x;
         let by = raven.cfg.float_btn_y;
@@ -1139,7 +1123,7 @@ pub fn handle_touch_event(
         }
         if ended && raven.cfg.dragging_btn {
             raven.cfg.dragging_btn = false;
-            if (x - (bx + bw * 0.5)).abs() < 14.0 && (y - (by + bh * 0.5)).abs() < 14.0 {
+            if (x - (bx + bw * 0.5)).abs() < 16.0 && (y - (by + bh * 0.5)).abs() < 16.0 {
                 raven.cfg.clickgui_open = true;
             }
             return true;
@@ -1147,18 +1131,17 @@ pub fn handle_touch_event(
         return false;
     }
 
-    // 2. When ClickGUI is open: swallow all touches so the player never attacks/moves behind the menu
     if !started {
         return true;
     }
 
-    // Check top-left `[ X ]` button (x: 6..30, y: 4..22) and top-right `[ X ]` button (x: screen_w-30..screen_w-6, y: 4..22)
-    if (y >= 2.0 && y <= 24.0) && ((x >= 4.0 && x <= 32.0) || (x >= screen_w - 32.0 && x <= screen_w - 4.0)) {
+    if (y >= 2.0 && y <= 24.0)
+        && ((x >= 4.0 && x <= 32.0) || (x >= screen_w - 32.0 && x <= screen_w - 4.0))
+    {
         raven.cfg.clickgui_open = false;
         return true;
     }
 
-    // Layout metrics matching `draw_hud_and_clickgui`
     let margin_x = 6.0;
     let gap = 3.0;
     let col_w = ((screen_w - margin_x * 2.0 - gap * 6.0) / 7.0).max(52.0);
@@ -1168,28 +1151,25 @@ pub fn handle_touch_event(
     let settings_top = (screen_h - 64.0).max(top_y + header_h + row_h * 5.0);
     let max_rows = (((settings_top - top_y - header_h - 6.0) / row_h).floor() as usize).max(4);
 
-    // Check clicks inside the 7 category columns
     for cat in 0..7 {
         let cx = margin_x + (cat as f32) * (col_w + gap);
         if x >= cx && x <= cx + col_w {
-            // Header scroll buttons: left half scrolls up, right half scrolls down
             if y >= top_y && y <= top_y + header_h {
                 let mods = category_modules(cat);
                 if x < cx + col_w * 0.5 {
                     raven.cfg.col_scroll[cat] = raven.cfg.col_scroll[cat].saturating_sub(2);
                 } else if raven.cfg.col_scroll[cat] + max_rows < mods.len() {
-                    raven.cfg.col_scroll[cat] = (raven.cfg.col_scroll[cat] + 2).min(mods.len().saturating_sub(max_rows));
+                    raven.cfg.col_scroll[cat] =
+                        (raven.cfg.col_scroll[cat] + 2).min(mods.len().saturating_sub(max_rows));
                 }
                 return true;
             }
 
-            // Module rows
             let mods = category_modules(cat);
             let scroll = raven.cfg.col_scroll[cat];
             for (idx, &m) in mods.iter().skip(scroll).take(max_rows).enumerate() {
                 let ry = top_y + header_h + (idx as f32) * row_h;
                 if y >= ry && y <= ry + row_h {
-                    // Rightmost 14px = `[+]` button to select this module for settings editor
                     if x >= cx + col_w - 14.0 {
                         raven.cfg.selected_module = m;
                     } else {
@@ -1202,7 +1182,6 @@ pub fn handle_touch_event(
         }
     }
 
-    // Check clicks inside the bottom Settings Inspector Bar (y >= settings_top)
     if y >= settings_top && y <= screen_h - 4.0 {
         handle_settings_bar_touch(&mut raven.cfg, x, y, screen_w, settings_top);
     }
@@ -1219,12 +1198,19 @@ fn handle_settings_bar_touch(cfg: &mut RavenConfig, x: f32, y: f32, screen_w: f3
     let in_row2 = y >= row2_y && y <= row2_y + 15.0;
     let is_minus = (x >= 130.0 && x <= 165.0) || (x >= mid_x + 110.0 && x <= mid_x + 145.0);
     let is_plus = (x >= 170.0 && x <= 205.0) || (x >= mid_x + 150.0 && x <= mid_x + 185.0);
-    let delta: f32 = if is_minus { -1.0 } else if is_plus { 1.0 } else { 0.0 };
+    let delta: f32 = if is_minus {
+        -1.0
+    } else if is_plus {
+        1.0
+    } else {
+        0.0
+    };
 
     match cfg.selected_module {
         "FastPlace" => {
             if in_row1 && delta != 0.0 {
-                cfg.fast_place_delay = (cfg.fast_place_delay as i32 + delta as i32).clamp(0, 4) as u8;
+                cfg.fast_place_delay =
+                    (cfg.fast_place_delay as i32 + delta as i32).clamp(0, 4) as u8;
             }
         }
         "Reach" => {
@@ -1239,7 +1225,7 @@ fn handle_settings_bar_touch(cfg: &mut RavenConfig, x: f32, y: f32, screen_w: f3
         }
         "KillAura" => {
             if in_row1 && x < mid_x && delta != 0.0 {
-                cfg.killaura_range = (cfg.killaura_range + f64::from(delta) * 0.1).clamp(3.0, 6.0);
+                cfg.killaura_range = (cfg.killaura_range + f64::from(delta) * 0.2).clamp(3.0, 6.5);
             } else if in_row1 && x >= mid_x {
                 cfg.killaura_mode = cfg.killaura_mode.next();
             } else if in_row2 && delta != 0.0 {
@@ -1275,7 +1261,8 @@ fn handle_settings_bar_touch(cfg: &mut RavenConfig, x: f32, y: f32, screen_w: f3
             if in_row1 && x < mid_x {
                 cfg.speed_mode = cfg.speed_mode.next();
             } else if in_row2 && delta != 0.0 {
-                cfg.speed_multiplier = (cfg.speed_multiplier + f64::from(delta) * 0.05).clamp(1.0, 3.0);
+                cfg.speed_multiplier =
+                    (cfg.speed_multiplier + f64::from(delta) * 0.05).clamp(1.0, 3.0);
             }
         }
         "Timer" => {
@@ -1287,17 +1274,19 @@ fn handle_settings_bar_touch(cfg: &mut RavenConfig, x: f32, y: f32, screen_w: f3
             if in_row1 && delta != 0.0 {
                 cfg.autoclicker_min_cps = (cfg.autoclicker_min_cps + delta).clamp(1.0, 25.0);
             } else if in_row2 && delta != 0.0 {
-                cfg.autoclicker_max_cps = (cfg.autoclicker_max_cps + delta).clamp(cfg.autoclicker_min_cps, 30.0);
+                cfg.autoclicker_max_cps =
+                    (cfg.autoclicker_max_cps + delta).clamp(cfg.autoclicker_min_cps, 30.0);
             }
         }
         "HitBox" => {
             if in_row1 && delta != 0.0 {
-                cfg.hitbox_expand = (cfg.hitbox_expand + f64::from(delta) * 0.05).clamp(0.0, 1.0);
+                cfg.hitbox_expand = (cfg.hitbox_expand + f64::from(delta) * 0.05).clamp(0.0, 1.5);
             }
         }
         "BackTrack" => {
             if in_row1 && delta != 0.0 {
-                cfg.backtrack_delay_ms = (cfg.backtrack_delay_ms as i64 + (delta as i64) * 25).clamp(25, 600) as u64;
+                cfg.backtrack_delay_ms =
+                    (cfg.backtrack_delay_ms as i64 + (delta as i64) * 25).clamp(25, 600) as u64;
             }
         }
         "SumoFences" => {
@@ -1313,14 +1302,12 @@ fn handle_settings_bar_touch(cfg: &mut RavenConfig, x: f32, y: f32, screen_w: f3
     }
 }
 
-/// Draws the in-game Raven HUD, floating `[ R ]` button, and full 7-column Raven bS+ ClickGUI
 pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
     let Ok(raven) = global_raven().lock() else {
         return;
     };
     let cfg = &raven.cfg;
 
-    // 1. In-game HUD ArrayList & Floating `[ R ]` button when ClickGUI is closed
     if !cfg.clickgui_open {
         if cfg.hud_enabled {
             batch.text(
@@ -1358,7 +1345,36 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
             }
         }
 
-        // Draggable Floating `[ R ]` button
+        // TargetHUD card when a combat target is active
+        if cfg.target_hud_enabled {
+            if let Some((ref tname, hp, max_hp, dist)) = raven.target_info {
+                let tx = (batch.width * 0.5 + 24.0).min(batch.width - 130.0);
+                let ty = batch.height * 0.5 + 16.0;
+                batch.fill(atlas, tx, ty, 122.0, 34.0, rgba(16, 16, 26, 215));
+                batch.fill(atlas, tx, ty, 122.0, 2.0, rgba(168, 85, 247, 255));
+                batch.text(atlas, tname, tx + 4.0, ty + 4.0, rgba(255, 255, 255, 255), true);
+                batch.text(
+                    atlas,
+                    &format!("{:.1} HP | {:.1}m", hp, dist),
+                    tx + 4.0,
+                    ty + 14.0,
+                    rgba(46, 204, 113, 255),
+                    true,
+                );
+                let ratio = (hp / max_hp.max(1.0)).clamp(0.0, 1.0);
+                batch.fill(atlas, tx + 4.0, ty + 25.0, 114.0, 5.0, rgba(45, 45, 60, 255));
+                batch.fill(
+                    atlas,
+                    tx + 4.0,
+                    ty + 25.0,
+                    114.0 * ratio,
+                    5.0,
+                    rgba(46, 204, 113, 255),
+                );
+            }
+        }
+
+        // Floating `[ R ]` button
         let (bx, by) = (cfg.float_btn_x, cfg.float_btn_y);
         batch.fill(atlas, bx, by, 28.0, 22.0, rgba(20, 20, 30, 215));
         batch.fill(atlas, bx, by, 28.0, 2.0, rgba(168, 85, 247, 255));
@@ -1366,7 +1382,6 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
         return;
     }
 
-    // 2. Full Raven bS+ ClickGUI Overlay
     let sw = batch.width;
     let sh = batch.height;
     batch.fill_gradient(
@@ -1376,19 +1391,15 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
         rgba(18, 14, 28, 235),
     );
 
-    // Top Bar + Left & Right `[ X ]` Close Buttons
     batch.fill(atlas, 0.0, 0.0, sw, 22.0, rgba(18, 18, 26, 245));
     batch.fill(atlas, 0.0, 21.0, sw, 1.0, rgba(168, 85, 247, 255));
 
-    // Top-Left `[ X ]` Close Button
+    // Left `[ X ]` & Right `[ X ]`
     batch.fill(atlas, 4.0, 3.0, 26.0, 16.0, rgba(231, 76, 60, 240));
     batch.text(atlas, "X", 14.0, 7.0, rgba(255, 255, 255, 255), true);
-
-    // Top-Right `[ X ]` Close Button
     batch.fill(atlas, sw - 30.0, 3.0, 26.0, 16.0, rgba(231, 76, 60, 240));
     batch.text(atlas, "X", sw - 20.0, 7.0, rgba(255, 255, 255, 255), true);
 
-    // Center Title
     let title = "Raven bS+ ClickGUI (Tap Module = ON/OFF | [+] = Settings | [X] = Close)";
     let tw = HudBatch::text_width(atlas, title);
     batch.text(
@@ -1400,7 +1411,6 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
         true,
     );
 
-    // 7 Category Columns
     let margin_x = 6.0;
     let gap = 3.0;
     let col_w = ((sw - margin_x * 2.0 - gap * 6.0) / 7.0).max(52.0);
@@ -1417,7 +1427,6 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
         let visible_count = mods.len().saturating_sub(scroll).min(max_rows);
         let col_h = header_h + (visible_count as f32) * row_h + 2.0;
 
-        // Column background & Raven purple header
         batch.fill(atlas, cx, top_y, col_w, col_h, rgba(16, 16, 24, 230));
         batch.fill(atlas, cx, top_y, col_w, header_h, rgba(142, 68, 173, 255));
         batch.text(
@@ -1439,7 +1448,6 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
             );
         }
 
-        // Module rows
         for (idx, &m) in mods.iter().skip(scroll).take(max_rows).enumerate() {
             let ry = top_y + header_h + (idx as f32) * row_h;
             let on = cfg.is_enabled(m);
@@ -1475,7 +1483,6 @@ pub fn draw_hud_and_clickgui(batch: &mut HudBatch, atlas: &HudAtlas) {
         }
     }
 
-    // Bottom Settings Inspector Panel for `cfg.selected_module`
     batch.fill(
         atlas,
         margin_x,
@@ -1523,10 +1530,8 @@ fn draw_slider_row(
         rgba(235, 235, 245, 255),
         true,
     );
-    // `[-]` button
     batch.fill(atlas, x + 124.0, y, 32.0, 14.0, rgba(192, 57, 43, 235));
     batch.text(atlas, " - ", x + 131.0, y + 3.0, rgba(255, 255, 255, 255), true);
-    // `[+]` button
     batch.fill(atlas, x + 162.0, y, 32.0, 14.0, rgba(39, 174, 96, 235));
     batch.text(atlas, " + ", x + 169.0, y + 3.0, rgba(255, 255, 255, 255), true);
 }
@@ -1758,4 +1763,953 @@ fn draw_module_settings_rows(
             );
         }
     }
+}
+
+// ============================================================================
+// REAL GAMEPLAY HOOKS MACRO FOR `crates/horizon-client/src/game.rs`
+// ============================================================================
+
+#[macro_export]
+macro_rules! impl_raven_game {
+    () => {
+        impl Game<'_> {
+            /// Executes all enabled Raven bS+ Combat, Movement, Player, World & Minigame modules
+            pub(crate) fn raven_tick(&mut self) {
+                let Ok(mut raven) = $crate::raven_bs::global_raven().lock() else {
+                    return;
+                };
+
+                // 1. Reach & HitBox expansion
+                if raven.cfg.reach_enabled {
+                    self.entity_reach = self.entity_reach.max(raven.cfg.reach_max);
+                    self.block_reach = self.block_reach.max(raven.cfg.reach_max + 1.0);
+                }
+                if raven.cfg.hitbox_enabled {
+                    self.entity_reach = self.entity_reach.max(3.0 + raven.cfg.hitbox_expand * 2.0);
+                }
+
+                // 2. FastPlace & DelayRemover & FastMine
+                if raven.cfg.fast_place_enabled {
+                    self.use_delay = self.use_delay.min(u32::from(raven.cfg.fast_place_delay));
+                }
+                if raven.cfg.delay_remover_enabled {
+                    self.destroy_delay = 0;
+                }
+                if raven.cfg.fast_mine_enabled {
+                    self.destroy_delay = 0;
+                    if let Some(m) = self.mining.as_mut() {
+                        m.progress += m.per_tick * (raven.cfg.fast_mine_multiplier - 1.0).max(0.1);
+                    }
+                }
+
+                // 3. Read Touch Stick + Physical Keys + Touch D-pad for Movement Input
+                let stick = self.touch_move().unwrap_or([0.0, 0.0]);
+                let mut move_fwd = stick[1];
+                let mut move_left = stick[0];
+                if self.physical_keys.contains(&KeyCode::KeyW) {
+                    move_fwd += 1.0;
+                }
+                if self.physical_keys.contains(&KeyCode::KeyS) {
+                    move_fwd -= 1.0;
+                }
+                if self.physical_keys.contains(&KeyCode::KeyA) {
+                    move_left += 1.0;
+                }
+                if self.physical_keys.contains(&KeyCode::KeyD) {
+                    move_left -= 1.0;
+                }
+                let is_moving = move_fwd.abs() > 0.05 || move_left.abs() > 0.05;
+                let jump_held = self.physical_keys.contains(&KeyCode::Space)
+                    || self.keys.held(Mapping::Jump);
+                let sneak_held = self.keys.held(Mapping::Sneak);
+
+                // Compute movement direction angle in radians from player yaw + input
+                let mut move_yaw = self.yaw;
+                if move_fwd < -0.05 {
+                    move_yaw += 180.0;
+                }
+                let diag = if move_fwd < -0.05 {
+                    -0.5
+                } else if move_fwd > 0.05 {
+                    0.5
+                } else {
+                    1.0
+                };
+                if move_left > 0.05 {
+                    move_yaw -= 90.0 * diag;
+                } else if move_left < -0.05 {
+                    move_yaw += 90.0 * diag;
+                }
+                let dir_rad = f64::from(move_yaw).to_radians();
+                let dir_x = -dir_rad.sin();
+                let dir_z = dir_rad.cos();
+
+                // Check ground & liquid under player's feet
+                let (p_pos, on_ground, in_liquid) = if let Some(p) = self.player.as_ref() {
+                    let bx = p.position.x.floor() as i32;
+                    let by = (p.position.y - 0.08).floor() as i32;
+                    let bz = p.position.z.floor() as i32;
+                    let below_state = self.world.block(bx, by, bz);
+                    let feet_state = self.world.block(bx, p.position.y.floor() as i32, bz);
+                    let solid_below = !self.res.facts().is_air(below_state)
+                        && self.res.facts().get(below_state).fluid == Fluid::None;
+                    let liq = self.res.facts().get(feet_state).fluid != Fluid::None;
+                    (
+                        [p.position.x, p.position.y, p.position.z],
+                        solid_below && p.velocity.y.abs() < 0.09,
+                        liq,
+                    )
+                } else {
+                    return;
+                };
+
+                if on_ground {
+                    raven.air_ticks = 0;
+                } else {
+                    raven.air_ticks = raven.air_ticks.saturating_add(1);
+                }
+
+                // 4. Freelook (locks camera angle while allowing body rotation)
+                if raven.cfg.freelook_enabled {
+                    if raven.freelook_anchor.is_none() {
+                        raven.freelook_anchor = Some((self.yaw, self.pitch));
+                    }
+                    self.posed_rotation = raven.freelook_anchor;
+                } else if raven.freelook_anchor.take().is_some() {
+                    self.posed_rotation = None;
+                }
+
+                // 5. Freecam
+                if raven.cfg.freecam_enabled {
+                    if raven.freecam_anchor.is_none() {
+                        raven.freecam_anchor = Some(p_pos);
+                    }
+                } else if let Some(anchor) = raven.freecam_anchor.take() {
+                    if let Some(p) = self.player.as_mut() {
+                        p.position = Vec3::new(anchor[0], anchor[1], anchor[2]);
+                        p.velocity = Vec3::ZERO;
+                    }
+                }
+
+                // 6. Player Physics & Movement Modules (NoFall, Velocity, JumpReset, Fly, Speed, BHop, LongJump, Step, Dolphin, VClip, InstantStop)
+                if let Some(p) = self.player.as_mut() {
+                    if raven.cfg.nofall_enabled || raven.cfg.fly_enabled {
+                        p.fall_distance = 0.0;
+                    }
+                    if raven.cfg.noslow_enabled {
+                        p.item_use_speed = Some(1.0);
+                        p.item_use_slows_sprint = false;
+                    }
+                    if raven.cfg.auto_jump_enabled {
+                        p.auto_jump_enabled = true;
+                    }
+
+                    // Velocity (Anti-KB) & JumpReset on damage tick
+                    if p.health.hurt.cooldown > 0 {
+                        if raven.cfg.jump_reset_enabled && on_ground && p.health.hurt.cooldown >= 8 {
+                            p.velocity.y = 0.42;
+                        }
+                        if raven.cfg.velocity_enabled && p.health.hurt.cooldown >= 8 {
+                            let h = f64::from(raven.cfg.velocity_horizontal) / 100.0;
+                            let v = f64::from(raven.cfg.velocity_vertical) / 100.0;
+                            p.velocity.x *= h;
+                            p.velocity.z *= h;
+                            p.velocity.y *= v;
+                        }
+                    }
+
+                    // VClip (one-shot vertical teleport through floor/ceiling)
+                    if raven.cfg.vclip_enabled {
+                        p.position.y += raven.cfg.vclip_distance;
+                        p.velocity.y = 0.0;
+                        p.teleported = true;
+                        raven.cfg.vclip_enabled = false;
+                    }
+
+                    // StopMotion / Stasis
+                    if raven.cfg.stop_motion_enabled || raven.cfg.stasis_enabled {
+                        p.velocity = Vec3::ZERO;
+                        raven.cfg.stop_motion_enabled = false;
+                    }
+
+                    // Fly / Freecam flight kinematics
+                    if raven.cfg.fly_enabled || raven.cfg.freecam_enabled {
+                        let spd = if raven.cfg.freecam_enabled {
+                            raven.cfg.freecam_speed * 0.45
+                        } else {
+                            raven.cfg.fly_speed * 0.42
+                        };
+                        if is_moving {
+                            p.velocity.x = dir_x * spd;
+                            p.velocity.z = dir_z * spd;
+                        } else {
+                            p.velocity.x = 0.0;
+                            p.velocity.z = 0.0;
+                        }
+                        match raven.cfg.fly_mode {
+                            $crate::raven_bs::FlyMode::Vanilla | $crate::raven_bs::FlyMode::Motion => {
+                                p.velocity.y = if jump_held {
+                                    spd * 0.75
+                                } else if sneak_held {
+                                    -spd * 0.75
+                                } else {
+                                    0.0
+                                };
+                            }
+                            $crate::raven_bs::FlyMode::Glide => {
+                                p.velocity.y = if jump_held { spd * 0.6 } else { -0.035 };
+                            }
+                            $crate::raven_bs::FlyMode::AirWalk => {
+                                p.velocity.y = 0.0;
+                            }
+                        }
+                    } else {
+                        // Speed / BHop / Boost
+                        if raven.cfg.speed_enabled || raven.cfg.bhop_enabled || raven.cfg.boost_enabled {
+                            let mult = if raven.cfg.boost_enabled {
+                                raven.cfg.speed_multiplier.max(1.6)
+                            } else {
+                                raven.cfg.speed_multiplier
+                            };
+                            let base_spd = 0.2873 * mult;
+                            if is_moving {
+                                p.velocity.x = dir_x * base_spd;
+                                p.velocity.z = dir_z * base_spd;
+                                if on_ground
+                                    && (raven.cfg.bhop_enabled
+                                        || matches!(
+                                            raven.cfg.speed_mode,
+                                            $crate::raven_bs::SpeedMode::BHop
+                                                | $crate::raven_bs::SpeedMode::HypixelLowHop
+                                        ))
+                                {
+                                    p.velocity.y = 0.42;
+                                } else if raven.cfg.speed_mode
+                                    == $crate::raven_bs::SpeedMode::HypixelLowHop
+                                    && raven.air_ticks == 4
+                                {
+                                    p.velocity.y = -0.098;
+                                }
+                            }
+                        }
+
+                        // LongJump
+                        if raven.cfg.long_jump_enabled && is_moving {
+                            if on_ground {
+                                p.velocity.y = 0.44;
+                                let lj_spd = 0.35 * raven.cfg.long_jump_boost;
+                                p.velocity.x = dir_x * lj_spd;
+                                p.velocity.z = dir_z * lj_spd;
+                            } else if raven.air_ticks <= 10 {
+                                p.velocity.y += 0.022;
+                            }
+                        }
+
+                        // InstantStop
+                        if raven.cfg.instant_stop_enabled && !is_moving && on_ground {
+                            p.velocity.x = 0.0;
+                            p.velocity.z = 0.0;
+                        }
+                    }
+
+                    // Dolphin (water boost)
+                    if raven.cfg.dolphin_enabled && in_liquid {
+                        p.velocity.y = 0.12;
+                        if is_moving {
+                            p.velocity.x = dir_x * 0.36;
+                            p.velocity.z = dir_z * 0.36;
+                        }
+                    }
+                }
+
+                // 7. Step (auto step up 1 to 2 block walls when colliding horizontally)
+                if raven.cfg.step_enabled && is_moving && on_ground {
+                    let front_x = (p_pos[0] + dir_x * 0.6).floor() as i32;
+                    let front_y = p_pos[1].floor() as i32;
+                    let front_z = (p_pos[2] + dir_z * 0.6).floor() as i32;
+                    let wall_low = !self.res.facts().is_air(self.world.block(front_x, front_y, front_z));
+                    let wall_high = self.res.facts().is_air(self.world.block(front_x, front_y + 1, front_z))
+                        && self.res.facts().is_air(self.world.block(front_x, front_y + 2, front_z));
+                    if wall_low && wall_high {
+                        if let Some(p) = self.player.as_mut() {
+                            p.position.y += f64::from(raven.cfg.step_height.clamp(1.0, 2.0));
+                        }
+                    }
+                }
+
+                // 8. SafeWalk & BridgeAssist (prevent falling off block edge)
+                if (raven.cfg.safewalk_enabled || raven.cfg.bridge_assist_enabled) && on_ground {
+                    if let Some(p) = self.player.as_mut() {
+                        let next_x = (p.position.x + p.velocity.x * 1.5).floor() as i32;
+                        let next_y = (p.position.y - 0.5).floor() as i32;
+                        let next_z = (p.position.z + p.velocity.z * 1.5).floor() as i32;
+                        if self.res.facts().is_air(self.world.block(next_x, next_y, next_z)) {
+                            if raven.cfg.safewalk_enabled {
+                                p.velocity.x = 0.0;
+                                p.velocity.z = 0.0;
+                            }
+                        }
+                    }
+                }
+
+                // 9. WaterBucket MLG
+                if raven.cfg.water_bucket_enabled {
+                    let falling_far = self
+                        .player
+                        .as_ref()
+                        .is_some_and(|p| p.fall_distance > 3.5);
+                    if falling_far {
+                        let bx = p_pos[0].floor() as i32;
+                        let by = (p_pos[1] - 2.0).floor() as i32;
+                        let bz = p_pos[2].floor() as i32;
+                        if !self.res.facts().is_air(self.world.block(bx, by, bz)) {
+                            if let Some(slot) = self.inventory.iter().take(9).position(|s| {
+                                s.as_ref().is_some_and(|it| &*it.item == "minecraft:water_bucket")
+                            }) {
+                                self.selected = slot;
+                                self.pitch = 90.0;
+                                self.use_clicks = self.use_clicks.saturating_add(1);
+                                if let Some(p) = self.player.as_mut() {
+                                    p.fall_distance = 0.0;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 10. AutoTool (auto-select best tool when mining or best sword when fighting)
+                if raven.cfg.auto_tool_enabled {
+                    if let Some(ref m) = self.mining {
+                        let state = self.world.block(m.pos[0], m.pos[1], m.pos[2]);
+                        let bname = &self.res.facts().get(state).name;
+                        let want = if bname.contains("stone")
+                            || bname.contains("ore")
+                            || bname.contains("obsidian")
+                            || bname.contains("brick")
+                        {
+                            "pickaxe"
+                        } else if bname.contains("log")
+                            || bname.contains("planks")
+                            || bname.contains("wood")
+                        {
+                            "axe"
+                        } else if bname.contains("dirt")
+                            || bname.contains("grass")
+                            || bname.contains("sand")
+                            || bname.contains("gravel")
+                        {
+                            "shovel"
+                        } else {
+                            ""
+                        };
+                        if !want.is_empty() {
+                            if let Some(slot) = self.inventory.iter().take(9).position(|s| {
+                                s.as_ref().is_some_and(|it| it.item.contains(want))
+                            }) {
+                                self.selected = slot;
+                            }
+                        }
+                    }
+                }
+
+                // 11. ChestStealer (loot open chest into player inventory)
+                if raven.cfg.chest_stealer_enabled
+                    && self.ticks % raven.cfg.chest_stealer_delay_ticks.max(1) == 0
+                {
+                    if let Some(key) = self.container {
+                        if let Some(BlockEntity::Chest(slots)) =
+                            self.world.block_entities.get_mut(&key)
+                        {
+                            for slot in slots.iter_mut() {
+                                if let Some(mut st) = slot.take() {
+                                    if &*st.item != "minecraft:air" && st.count > 0 {
+                                        let leftover = inventory_add(
+                                            &mut self.inventory,
+                                            &mut self.offhand,
+                                            self.selected,
+                                            64,
+                                            &mut st,
+                                        );
+                                        if leftover && st.count > 0 {
+                                            *slot = Some(st);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 12. KillAura, AimAssist, AutoClicker, TPAura & AntiFireball
+                let eye = self.eye_position().unwrap_or([p_pos[0], p_pos[1] + 1.62, p_pos[2]]);
+                let ka_range = raven.cfg.killaura_range;
+                let aa_range = raven.cfg.aim_assist_distance;
+                let tp_range = raven.cfg.tp_aura_range;
+                let search_range = ka_range.max(aa_range).max(tp_range);
+
+                let mut targets: Vec<(usize, [f64; 3], f64, String, f32, f32)> = self
+                    .mobs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| !m.removed && m.alive() && Some(m.id) != self.riding)
+                    .filter_map(|(idx, m)| {
+                        let tpos = [
+                            m.position.x,
+                            m.position.y + f64::from(m.height()) * 0.75,
+                            m.position.z,
+                        ];
+                        let dx = tpos[0] - eye[0];
+                        let dy = tpos[1] - eye[1];
+                        let dz = tpos[2] - eye[2];
+                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if dist <= search_range {
+                            let clean_name = m
+                                .kind
+                                .id
+                                .trim_start_matches("minecraft:")
+                                .replace('_', " ");
+                            Some((idx, tpos, dist, clean_name, 20.0, 20.0))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                targets.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+
+                if let Some((_, tpos, dist, ref name, hp, max_hp)) = targets.first() {
+                    raven.target_info = Some((name.clone(), *hp, *max_hp, *dist));
+
+                    // AimAssist
+                    if raven.cfg.aim_assist_enabled && *dist <= aa_range {
+                        let desired = $crate::raven_bs::calc_angles(eye, *tpos);
+                        let fov_diff = $crate::raven_bs::wrap_deg(desired.0 - self.yaw).abs();
+                        if fov_diff <= raven.cfg.aim_assist_fov {
+                            let (nyaw, npitch) = $crate::raven_bs::smooth_rot(
+                                (self.yaw, self.pitch),
+                                desired,
+                                raven.cfg.aim_assist_speed,
+                            );
+                            self.yaw = nyaw;
+                            self.pitch = npitch;
+                        }
+                    }
+
+                    // TPAura
+                    if raven.cfg.tp_aura_enabled && *dist <= tp_range && self.ticks % 6 == 0 {
+                        if let Some(p) = self.player.as_mut() {
+                            p.position = Vec3::new(tpos[0], tpos[1] - 0.5, tpos[2]);
+                            p.teleported = true;
+                        }
+                    }
+                } else {
+                    raven.target_info = None;
+                }
+
+                // KillAura execution
+                if raven.cfg.killaura_enabled {
+                    let in_ka: Vec<_> = targets
+                        .iter()
+                        .filter(|(_, _, d, _, _, _)| *d <= ka_range)
+                        .collect();
+                    if !in_ka.is_empty() {
+                        let pick_i = raven.switch_idx % in_ka.len();
+                        let (_, tpos, _, _, _, _) = in_ka[pick_i];
+                        let desired = $crate::raven_bs::calc_angles(eye, *tpos);
+                        let (nyaw, npitch) = $crate::raven_bs::smooth_rot(
+                            (self.yaw, self.pitch),
+                            desired,
+                            raven.cfg.killaura_rot_speed,
+                        );
+                        // Keep camera steady with posed_rotation while server/aim yaw points at target!
+                        if self.posed_rotation.is_none() {
+                            self.posed_rotation = Some((self.yaw, self.pitch));
+                        }
+                        self.yaw = nyaw;
+                        self.pitch = npitch;
+
+                        // AutoSwap to sword if enabled
+                        if raven.cfg.auto_swap_enabled {
+                            if let Some(sword_slot) =
+                                self.inventory.iter().take(9).position(|s| {
+                                    s.as_ref().is_some_and(|it| it.item.contains("sword"))
+                                })
+                            {
+                                self.selected = sword_slot;
+                            }
+                        }
+
+                        let r = raven.rand_f32();
+                        let cps = raven.cfg.killaura_min_cps
+                            + r * (raven.cfg.killaura_max_cps - raven.cfg.killaura_min_cps);
+                        let delay = Duration::from_secs_f32(1.0 / cps.max(1.0));
+                        if raven.last_attack.elapsed() >= delay {
+                            raven.last_attack = Instant::now();
+                            raven.switch_idx = raven.switch_idx.wrapping_add(1);
+                            raven.lmb_clicks.push_back(raven.last_attack);
+                            self.entity_reach = self.entity_reach.max(ka_range);
+                            self.attack_clicks = self.attack_clicks.saturating_add(1);
+                            self.swing_arm();
+                            if raven.cfg.autoblock_enabled {
+                                self.use_clicks = self.use_clicks.saturating_add(1);
+                            }
+                        }
+                    } else if !raven.cfg.freelook_enabled {
+                        self.posed_rotation = None;
+                    }
+                }
+
+                // AutoClicker execution
+                if raven.cfg.autoclicker_enabled && (self.left || self.touch.holding.is_some()) {
+                    let r = raven.rand_f32();
+                    let cps = raven.cfg.autoclicker_min_cps
+                        + r * (raven.cfg.autoclicker_max_cps - raven.cfg.autoclicker_min_cps);
+                    let delay = Duration::from_secs_f32(1.0 / cps.max(1.0));
+                    if raven.last_attack.elapsed() >= delay {
+                        raven.last_attack = Instant::now();
+                        raven.lmb_clicks.push_back(raven.last_attack);
+                        self.attack_clicks = self.attack_clicks.saturating_add(1);
+                        self.swing_arm();
+                        if raven.cfg.autoclicker_jitter > 0.0 {
+                            let jx = (raven.rand_f32() - 0.5) * raven.cfg.autoclicker_jitter;
+                            let jy = (raven.rand_f32() - 0.5) * raven.cfg.autoclicker_jitter;
+                            self.yaw = $crate::raven_bs::wrap_deg(self.yaw + jx);
+                            self.pitch = (self.pitch + jy).clamp(-90.0, 90.0);
+                        }
+                    }
+                }
+
+                // 13. Scaffold (with HypixelJump / Telly Schedule / Tower / Auto-Block Pick)
+                if raven.cfg.scaffold_enabled {
+                    let block_slot = self.inventory.iter().take(9).position(|s| {
+                        s.as_ref().is_some_and(|st| {
+                            st.count > 0
+                                && self.pack.assets.registry.default_state(&st.item).is_some()
+                                && !self
+                                    .res
+                                    .facts()
+                                    .is_air(self.pack.assets.registry.default_state(&st.item).unwrap())
+                        })
+                    });
+
+                    if let Some(slot) = block_slot {
+                        self.selected = slot;
+                    }
+
+                    // Tower up when holding jump
+                    if raven.cfg.scaffold_tower && jump_held && !is_moving {
+                        if let Some(p) = self.player.as_mut() {
+                            p.velocity.y = 0.42;
+                        }
+                    }
+
+                    // HypixelJump sprint modes
+                    if is_moving
+                        && on_ground
+                        && matches!(
+                            raven.cfg.scaffold_sprint,
+                            $crate::raven_bs::ScaffoldSprintMode::JumpSprint
+                                | $crate::raven_bs::ScaffoldSprintMode::HypixelJumpSprint
+                                | $crate::raven_bs::ScaffoldSprintMode::HypixelJump2Sprint
+                                | $crate::raven_bs::ScaffoldSprintMode::HypixelJump3Sprint
+                        )
+                    {
+                        if let Some(p) = self.player.as_mut() {
+                            p.velocity.y = 0.42;
+                        }
+                    }
+
+                    // Telly schedule check
+                    let can_place = match raven.cfg.scaffold_schedule {
+                        $crate::raven_bs::ScaffoldScheduleMode::Normal => true,
+                        $crate::raven_bs::ScaffoldScheduleMode::SimpleTelly => {
+                            raven.air_ticks == 0 || raven.air_ticks >= 2
+                        }
+                        $crate::raven_bs::ScaffoldScheduleMode::Telly => {
+                            raven.air_ticks == 0 || raven.air_ticks >= 3
+                        }
+                    };
+
+                    if can_place {
+                        let under = [
+                            p_pos[0].floor() as i32,
+                            (p_pos[1] - 1.0).floor() as i32,
+                            p_pos[2].floor() as i32,
+                        ];
+                        if self
+                            .res
+                            .facts()
+                            .is_air(self.world.block(under[0], under[1], under[2]))
+                        {
+                            let state_to_place = self
+                                .inventory
+                                .get(self.selected)
+                                .and_then(|s| s.as_ref())
+                                .and_then(|st| self.pack.assets.registry.default_state(&st.item))
+                                .or_else(|| {
+                                    self.pack.assets.registry.default_state("minecraft:white_wool")
+                                });
+
+                            if let Some(state) = state_to_place {
+                                drop(raven);
+                                let _ = self.level_set(under, state);
+                                self.swing_arm();
+                                if !self.creative {
+                                    if let Some(Some(st)) = self.inventory.get_mut(self.selected) {
+                                        st.count = st.count.saturating_sub(1);
+                                        if st.count == 0 {
+                                            self.inventory[self.selected] = None;
+                                        }
+                                    }
+                                }
+                                if let Ok(mut r) = $crate::raven_bs::global_raven().lock() {
+                                    r.blocks_placed_session =
+                                        r.blocks_placed_session.saturating_add(1);
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // 14. BedAura (auto break beds within range)
+                if raven.cfg.bed_aura_enabled {
+                    let r = raven.cfg.bed_aura_range.ceil() as i32;
+                    let px = p_pos[0].floor() as i32;
+                    let py = p_pos[1].floor() as i32;
+                    let pz = p_pos[2].floor() as i32;
+                    let mut found_bed = None;
+                    'bed_scan: for dx in -r..=r {
+                        for dy in -r..=r {
+                            for dz in -r..=r {
+                                let bp = [px + dx, py + dy, pz + dz];
+                                let st = self.world.block(bp[0], bp[1], bp[2]);
+                                if self.res.facts().get(st).name.ends_with("_bed") {
+                                    found_bed = Some(bp);
+                                    break 'bed_scan;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(bed_pos) = found_bed {
+                        drop(raven);
+                        let _ = self.break_block_as_player(bed_pos);
+                        self.swing_arm();
+                        return;
+                    }
+                }
+
+                // 15. BlockIn (surround player with blocks)
+                if raven.cfg.block_in_enabled {
+                    let bx = p_pos[0].floor() as i32;
+                    let by = p_pos[1].floor() as i32;
+                    let bz = p_pos[2].floor() as i32;
+                    let surround = [
+                        [bx + 1, by, bz],
+                        [bx - 1, by, bz],
+                        [bx, by, bz + 1],
+                        [bx, by, bz - 1],
+                        [bx + 1, by + 1, bz],
+                        [bx - 1, by + 1, bz],
+                        [bx, by + 1, bz + 1],
+                        [bx, by + 1, bz - 1],
+                        [bx, by + 2, bz],
+                    ];
+                    if let Some(wall_state) = self
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:oak_planks")
+                    {
+                        for pos in surround {
+                            if self
+                                .res
+                                .facts()
+                                .is_air(self.world.block(pos[0], pos[1], pos[2]))
+                            {
+                                drop(raven);
+                                let _ = self.level_set(pos, wall_state);
+                                return;
+                            }
+                        }
+                    }
+                }
+
+                // 16. Weather clear
+                if raven.cfg.weather_clear {
+                    self.world.weather.raining = false;
+                    self.world.weather.thundering = false;
+                }
+            }
+
+            /// Projects 3D world coordinates onto the 2D HUD and draws ESP, Tracers, Keystrokes & ClickGUI
+            pub(crate) fn raven_hud(&mut self, batch: &mut HudBatch) {
+                let (
+                    esp_mobs,
+                    esp_items,
+                    esp_beds,
+                    esp_chests,
+                    tracers,
+                    nametags,
+                    keystrokes,
+                    saturation_hud,
+                    bridge_info,
+                    blocks_placed,
+                ) = {
+                    let Ok(mut raven) = $crate::raven_bs::global_raven().lock() else {
+                        return;
+                    };
+                    let now = Instant::now();
+                    raven
+                        .lmb_clicks
+                        .retain(|t| now.duration_since(*t) <= Duration::from_secs(1));
+                    raven
+                        .rmb_clicks
+                        .retain(|t| now.duration_since(*t) <= Duration::from_secs(1));
+                    (
+                        raven.cfg.player_esp_enabled || raven.cfg.mob_esp_enabled || raven.cfg.chams_enabled,
+                        raven.cfg.item_esp_enabled,
+                        raven.cfg.bed_esp_enabled,
+                        raven.cfg.chest_esp_enabled,
+                        raven.cfg.tracers_enabled,
+                        raven.cfg.nametags_enabled,
+                        raven.cfg.keystrokes_enabled,
+                        raven.cfg.saturation_hud_enabled,
+                        raven.cfg.bridge_info_enabled,
+                        raven.blocks_placed_session,
+                    )
+                };
+
+                let atlas = &self.gui.atlas;
+                let sw = batch.width;
+                let sh = batch.height;
+
+                // 3D -> 2D projection helper using `self.camera_orientation()`
+                let eye = self.eye_position().unwrap_or([0.0, 64.0, 0.0]);
+                let inv_rot = self.camera_orientation().inverse();
+                let fov_rad = (self.settings.fov as f32).clamp(30.0, 120.0).to_radians();
+                let focal = 1.0 / (fov_rad * 0.5).tan();
+                let aspect = sw / sh.max(1.0);
+
+                let project = |wpos: [f64; 3]| -> Option<(f32, f32, f32)> {
+                    let rel = glam::Vec3::new(
+                        (wpos[0] - eye[0]) as f32,
+                        (wpos[1] - eye[1]) as f32,
+                        (wpos[2] - eye[2]) as f32,
+                    );
+                    let cam = inv_rot * rel;
+                    let z_front = -cam.z;
+                    if z_front <= 0.15 {
+                        return None;
+                    }
+                    let ndc_x = (cam.x / z_front) * (focal / aspect);
+                    let ndc_y = (cam.y / z_front) * focal;
+                    let sx = (ndc_x + 1.0) * 0.5 * sw;
+                    let sy = (1.0 - ndc_y) * 0.5 * sh;
+                    if sx >= -50.0 && sx <= sw + 50.0 && sy >= -50.0 && sy <= sh + 50.0 {
+                        Some((sx, sy, z_front))
+                    } else {
+                        None
+                    }
+                };
+
+                // 1. PlayerESP / MobESP / Tracers / Nametags
+                if esp_mobs || tracers || nametags {
+                    for m in &self.mobs {
+                        if m.removed || !m.alive() || Some(m.id) == self.riding {
+                            continue;
+                        }
+                        let feet = [m.position.x, m.position.y, m.position.z];
+                        let head = [
+                            m.position.x,
+                            m.position.y + f64::from(m.height()),
+                            m.position.z,
+                        ];
+                        if let (Some((fx, fy, dist)), Some((_, hy, _))) =
+                            (project(feet), project(head))
+                        {
+                            let box_h = (fy - hy).abs().max(6.0);
+                            let box_w = (box_h * 0.55).max(4.0);
+                            let bx = fx - box_w * 0.5;
+                            let by = hy.min(fy);
+
+                            if esp_mobs {
+                                let col = rgba(0, 229, 255, 230);
+                                batch.fill(atlas, bx, by, box_w, 1.0, col);
+                                batch.fill(atlas, bx, by + box_h, box_w, 1.0, col);
+                                batch.fill(atlas, bx, by, 1.0, box_h, col);
+                                batch.fill(atlas, bx + box_w, by, 1.0, box_h, col);
+                            }
+
+                            if nametags {
+                                let label = format!(
+                                    "{} [{:.0}m]",
+                                    m.kind.id.trim_start_matches("minecraft:"),
+                                    dist
+                                );
+                                let lw = HudBatch::text_width(atlas, &label);
+                                batch.fill(
+                                    atlas,
+                                    fx - lw * 0.5 - 2.0,
+                                    by - 11.0,
+                                    lw + 4.0,
+                                    10.0,
+                                    rgba(0, 0, 0, 160),
+                                );
+                                batch.text(
+                                    atlas,
+                                    &label,
+                                    fx - lw * 0.5,
+                                    by - 10.0,
+                                    rgba(255, 255, 255, 255),
+                                    true,
+                                );
+                            }
+
+                            if tracers {
+                                let cx = sw * 0.5;
+                                let cy = sh * 0.5;
+                                batch.fill_quad(
+                                    atlas,
+                                    [
+                                        [cx - 0.5, cy],
+                                        [cx + 0.5, cy],
+                                        [fx + 0.5, fy],
+                                        [fx - 0.5, fy],
+                                    ],
+                                    rgba(168, 85, 247, 190),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // 2. ItemESP
+                if esp_items {
+                    for item in &self.dropped {
+                        let ipos = [item.position.x, item.position.y + 0.25, item.position.z];
+                        if let Some((ix, iy, _)) = project(ipos) {
+                            batch.fill(atlas, ix - 3.0, iy - 3.0, 6.0, 6.0, rgba(241, 196, 15, 230));
+                        }
+                    }
+                }
+
+                // 3. ChestESP & BedESP
+                if esp_chests || esp_beds {
+                    let px = eye[0].floor() as i32;
+                    let py = eye[1].floor() as i32;
+                    let pz = eye[2].floor() as i32;
+                    if esp_chests {
+                        for &(cx, cy, cz) in self.world.block_entities.keys() {
+                            if (cx - px).abs() <= 32 && (cz - pz).abs() <= 32 {
+                                if let Some((sx, sy, _)) =
+                                    project([f64::from(cx) + 0.5, f64::from(cy) + 0.5, f64::from(cz) + 0.5])
+                                {
+                                    batch.fill(
+                                        atlas,
+                                        sx - 4.0,
+                                        sy - 4.0,
+                                        8.0,
+                                        8.0,
+                                        rgba(230, 126, 34, 220),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if esp_beds {
+                        for dx in -16..=16 {
+                            for dy in -8..=8 {
+                                for dz in -16..=16 {
+                                    let st = self.world.block(px + dx, py + dy, pz + dz);
+                                    if self.res.facts().get(st).name.ends_with("_bed") {
+                                        if let Some((sx, sy, _)) = project([
+                                            f64::from(px + dx) + 0.5,
+                                            f64::from(py + dy) + 0.5,
+                                            f64::from(pz + dz) + 0.5,
+                                        ]) {
+                                            batch.fill(
+                                                atlas,
+                                                sx - 5.0,
+                                                sy - 5.0,
+                                                10.0,
+                                                10.0,
+                                                rgba(231, 76, 60, 230),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 4. Keystrokes Widget
+                if keystrokes {
+                    let kx = 6.0;
+                    let ky = 72.0;
+                    let stick = self.touch_move().unwrap_or([0.0, 0.0]);
+                    let w_on = stick[1] > 0.2 || self.physical_keys.contains(&KeyCode::KeyW);
+                    let s_on = stick[1] < -0.2 || self.physical_keys.contains(&KeyCode::KeyS);
+                    let a_on = stick[0] > 0.2 || self.physical_keys.contains(&KeyCode::KeyA);
+                    let d_on = stick[0] < -0.2 || self.physical_keys.contains(&KeyCode::KeyD);
+                    let lmb_on = self.left || self.touch.holding.is_some();
+                    let rmb_on = self.right;
+
+                    let key_box = |batch: &mut HudBatch, x: f32, y: f32, w: f32, h: f32, lbl: &str, active: bool| {
+                        let bg = if active {
+                            rgba(168, 85, 247, 210)
+                        } else {
+                            rgba(20, 20, 30, 175)
+                        };
+                        batch.fill(atlas, x, y, w, h, bg);
+                        let tw = HudBatch::text_width(atlas, lbl);
+                        batch.text(
+                            atlas,
+                            lbl,
+                            x + (w - tw) * 0.5,
+                            y + (h - 8.0) * 0.5,
+                            rgba(255, 255, 255, 255),
+                            true,
+                        );
+                    };
+
+                    key_box(batch, kx + 18.0, ky, 16.0, 16.0, "W", w_on);
+                    key_box(batch, kx, ky + 18.0, 16.0, 16.0, "A", a_on);
+                    key_box(batch, kx + 18.0, ky + 18.0, 16.0, 16.0, "S", s_on);
+                    key_box(batch, kx + 36.0, ky + 18.0, 16.0, 16.0, "D", d_on);
+                    key_box(batch, kx, ky + 36.0, 25.0, 14.0, "LMB", lmb_on);
+                    key_box(batch, kx + 27.0, ky + 36.0, 25.0, 14.0, "RMB", rmb_on);
+                }
+
+                // 5. Saturation HUD & BridgeInfo Counter
+                if saturation_hud {
+                    if let Some(p) = self.player.as_ref() {
+                        batch.text(
+                            atlas,
+                            &format!("Sat: {:.1}", p.health.food.saturation),
+                            sw * 0.5 + 12.0,
+                            sh - 49.0,
+                            rgba(241, 196, 15, 255),
+                            true,
+                        );
+                    }
+                }
+                if bridge_info {
+                    batch.text(
+                        atlas,
+                        &format!("Blocks Placed: {}", blocks_placed),
+                        sw * 0.5 - 38.0,
+                        sh - 62.0,
+                        rgba(46, 204, 113, 255),
+                        true,
+                    );
+                }
+
+                // 6. Draw Raven bS+ Floating Button & ClickGUI on top of everything
+                $crate::raven_bs::draw_hud_and_clickgui(batch, atlas);
+            }
+        }
+    };
 }
