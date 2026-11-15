@@ -1,6 +1,6 @@
 [package]
 name = "horizon-client-render"
-version = "0.2.91"
+version = "0.2.96"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -79,11 +79,6 @@ audio = ["dep:cpal"]
 test-support = []
 # The `scene_replay` example's allocator counts allocations (horizon-threads' `alloc-count`).
 alloc-count = ["horizon-threads/alloc-count"]
-
-# horizon-client's `horizon-extras`: asking the device for hardware ray tracing on request
-# (`gfx/ray_query.rs`, `HORIZON_RAY_TRACING=1`). Without it the device is requested as without
-# the variable.
-horizon-extras = []
 
 [lints]
 workspace = true

@@ -1,7 +1,5 @@
 # Horizon native client
 
-> For iOS/iPadOS installation, use the [mobile setup guide](../README.md) and [mobile releases](https://github.com/heyskylo/horizon-ios/releases). This shared engine guide also describes desktop builds and commands. Its upstream desktop download links do not provide an iOS IPA. Report mobile bugs in [the fork’s issues](https://github.com/heyskylo/horizon-ios/issues).
-
 `horizon-client` is the playable Rust client for Minecraft Java Edition 26.3.
 It streams a world around the player on worker threads, renders every vanilla
 block model with smooth lighting and biome tints, and runs the validated player
@@ -10,7 +8,7 @@ hardness/tool rules, collect drops from the block loot tables, place blocks,
 craft in the 2x2 inventory grid or on a crafting table, and save and reload worlds
 in vanilla's Anvil format.
 
-**Status:** playable; players get it through [the launcher](../launcher/README.md). The [harness table](../README.md#current-limitations)
+**Status:** playable; players get it through [the launcher](../launcher/README.md). The [harness table](status.md#what-the-harnesses-compare)
 in the README scores each subsystem against vanilla and lists what is still
 missing; [Rust rewrite status](rust-parity.md) has the details.
 
@@ -67,7 +65,7 @@ Use current stable Rust (1.90+) and JDK 25 (Python 3.11+ only for the developmen
 harnesses). A checkout never
 downloads the game: resource preparation imports **your own copy** (the 26.3
 client from your official launcher install, and the 26.3 server jar you
-downloaded yourself; see [Build from source](../README.md#build-from-source)),
+downloaded yourself; see [Build from source](#run-from-a-checkout)),
 verifies it against the pinned checksums, runs vanilla's data generator and small
 exporters against those jars, and extracts the jar's assets and data into ignored
 `.local/horizon-client/26.3/`. Sounds (about 380 MB) are copied from your
@@ -137,8 +135,6 @@ Optional Windows allocator build features are documented in
 | `--creative` | Creative mode (instant breaking, pick block) |
 | `--render-distance N` | Chunks, 2..128 (default 12) |
 | `--resources PATH` | Prepared resource directory |
-| `--pack-resources PATH` | Write `PATH` as one `.zip` a phone can import, then exit |
-| `--out PATH` | Where `--pack-resources` writes it (default: the folder's name, plus `.zip`, beside it) |
 
 | Control | Action |
 | --- | --- |
@@ -465,25 +461,6 @@ to the target machine (same OS and architecture), unpack it and run
 Saves and `options.txt` go to `~/.local/share/horizon` (or `$HORIZON_HOME`), so
 unpacking an update keeps them. The archive contains Mojang assets: keep it
 private.
-
-### Carry your game files to a phone
-
-The iOS build ships with no assets in it -- the workflow refuses any bundle
-containing `horizon-resources.json`, and the phone's own bundle is read-only
-while the game runs -- so a phone is given its files by the game it already has
-on the computer that prepared them:
-
-```sh
-horizon-client --pack-resources .local/horizon-client/26.3 --out Horizon-26.3.zip
-```
-
-One archive, then either door: open the address the phone shows and drop the
-file in, or copy the same `.zip` into the app's `Documents` folder with a cable.
-A world and a resource pack go in the same way, and the phone tells them apart
-by what is at the archive's root. [Running the game on an
-iPhone](../packaging/ios/README.md#bringing-the-game-files-across) is the
-detail. This archive holds Mojang's assets too, so it goes nowhere but your own
-devices.
 
 ## How it fits together
 

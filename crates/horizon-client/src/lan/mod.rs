@@ -10,6 +10,7 @@ pub mod anticheat;
 pub mod arrivals;
 pub mod attributes;
 mod biome_resend;
+mod body;
 pub mod border;
 pub mod chunk_sync;
 pub mod chunks;
@@ -21,6 +22,7 @@ pub mod conn;
 pub mod containers;
 pub mod data;
 pub mod discovery;
+mod effect_meta;
 pub mod entity;
 pub mod equipment_cache;
 pub mod far;
@@ -40,6 +42,7 @@ mod sound_order;
 pub mod tracking;
 pub mod waypoints;
 
+pub use body::Body;
 pub use conn::{Holding, PlayerSender, flush_all};
 use horizon_protocol::packets::play;
 use horizon_protocol::{
@@ -250,6 +253,9 @@ pub struct NetConfig {
     pub gate: Option<LoginGate>,
     /// Online mode: players are authenticated (a LAN world's when its host is signed in).
     pub online: Option<Arc<OnlineMode>>,
+    /// A LAN world also welcomes guests signed in to Ely.by: when the Mojang services don't know a
+    /// joining name, `auth::elyby_has_joined` is asked before refusing (`conn::authenticate`).
+    pub elyby_guests: bool,
     /// Behind a Velocity proxy: the secret its forwarded player information is signed with. Only an offline
     /// server (the proxy authenticates) uses it; without it a login is the plain offline one.
     pub forwarding_secret: Option<Vec<u8>>,
@@ -330,6 +336,7 @@ impl NetConfig {
             bypasses_limit: None,
             gate: None,
             online: None,
+            elyby_guests: true,
             forwarding_secret: None,
             arrivals: None,
             log: None,
@@ -1061,6 +1068,19 @@ pub fn available_port() -> u16 {
     TcpListener::bind((bind, 0))
         .and_then(|l| l.local_addr())
         .map_or(25565, |a| a.port())
+}
+
+/// The IPv4 address this machine reaches the network by, the one a guest's
+/// Direct Connection would use. No packet is sent (a UDP connect only picks
+/// the route), and only a local-network address counts: with no Wi-Fi a
+/// phone's route leads to the carrier, whose address no guest can reach.
+pub fn local_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect(("8.8.8.8", 80)).ok()?;
+    match socket.local_addr().ok()? {
+        SocketAddr::V4(address) if address.ip().is_private() => Some(*address.ip()),
+        _ => None,
+    }
 }
 
 /// Same-machine harnesses opt in; real LAN runs keep the normal network interfaces.

@@ -192,6 +192,13 @@ final class GameFilesDownload: NSObject, ObservableObject {
             Haptics.failed()
         case let .success(file):
             defer { try? FileManager.default.removeItem(at: file) }
+            // A 200 answer can still be a web page (a sign-in wall, an error page) saved under the link's
+            // name; the importer would only say it found no EOCD. Say what actually arrived.
+            guard Self.looksLikeZip(file) else {
+                state = .failed("That link returned a web page, not a ZIP archive. Paste the link that downloads the ZIP itself.")
+                Haptics.failed()
+                break
+            }
             // A manual/cable import can also finish after the HTTP transfer began.
             guard !resourcesOnly || !GameFolder.hasGameFiles else {
                 state = .done("Game files are already installed.")
@@ -210,6 +217,16 @@ final class GameFilesDownload: NSObject, ObservableObject {
             }
         }
         endBackground()
+    }
+
+    /// The bytes a ZIP starts with (`PK` and a 03/05/07 record) or the start of a web page, a JSON error
+    /// or an empty file. Only a hint for a friendlier message: the importer still checks the archive.
+    private nonisolated static func looksLikeZip(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        let head = Array((try? handle.read(upToCount: 4)) ?? Data())
+        return head.count == 4 && head[0] == 0x50 && head[1] == 0x4B
+            && (head[2] == 0x03 || head[2] == 0x05 || head[2] == 0x07)
     }
 
     private static func describe(_ answer: [String: Any]) -> String {
@@ -332,7 +349,6 @@ struct GameFilesCard: View {
     /// The game has none yet: say so first.
     var missing: Bool
     var setupHelp: (() -> Void)? = nil
-    @State private var choosingFile = false
     @State private var fileIssue: String?
 
     var body: some View {
@@ -364,7 +380,7 @@ struct GameFilesCard: View {
                     .accessibilityIdentifier("launcher-download-game-files")
                 }
                 SecondaryButton(title: "Import a ZIP from Files", icon: "doc.badge.plus") {
-                    choosingFile = true
+                    chooseFile()
                 }
                 .accessibilityIdentifier("launcher-import-zip")
             }
@@ -393,15 +409,20 @@ struct GameFilesCard: View {
         .padding(16)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(missing ? Theme.noticeBorder : Theme.border))
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.zip]) { result in
-            switch result {
-            case let .success(url): Task { await download.importChosen(url) }
-            case let .failure(error): fileIssue = error.localizedDescription
-            }
-        }
         .alert("Couldn’t open that ZIP", isPresented: Binding(
             get: { fileIssue != nil }, set: { if !$0 { fileIssue = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(fileIssue ?? "") }
+    }
+
+    /// The ZIP comes from UIKit's picker: SwiftUI's own draws the Files screen but takes no taps on iOS 15.
+    private func chooseFile() {
+        DocumentPicker.choose(types: [.zip]) { result in
+            switch result {
+            case let .success(urls):
+                if let url = urls.first { Task { await download.importChosen(url) } }
+            case let .failure(error): fileIssue = error.localizedDescription
+            }
+        }
     }
 
     @ViewBuilder private var progress: some View {
@@ -446,7 +467,6 @@ struct GameFilesRecovery: View {
     let version: String
     let signedIn: Bool
     var configureManually: (() -> Void)? = nil
-    @State private var choosingFile = false
     @State private var fileIssue: String?
     @Environment(\.dismiss) private var dismiss
 
@@ -486,7 +506,7 @@ struct GameFilesRecovery: View {
                         .font(.footnote.monospaced()).textSelection(.enabled)
                     Text("Replace <prepared-folder> with the folder created by preparation. A Minecraft JAR, world ZIP or resource pack alone cannot replace these files.")
                     Text("Copy the prepared ZIP into Horizon’s Documents folder using Finder or Apple Devices file sharing. You can also put it at a link this iPad can reach and use Download from link below.")
-                    Button("Choose prepared ZIP") { choosingFile = true }
+                    Button("Choose prepared ZIP") { chooseFile() }
                         .disabled(download.busy)
                         .accessibilityIdentifier("launcher-import-prepared-files")
                     Text("Choose the ZIP from Files after transferring it. When installation finishes, return to Play. Your worlds and sign-in are kept.")
@@ -504,15 +524,19 @@ struct GameFilesRecovery: View {
                 }
             }
         }
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.zip]) { result in
-            switch result {
-            case let .success(url): Task { await download.importChosen(url) }
-            case let .failure(error): fileIssue = error.localizedDescription
-            }
-        }
         .alert("Couldn’t open game files", isPresented: Binding(
             get: { fileIssue != nil }, set: { if !$0 { fileIssue = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(fileIssue ?? "") }
         .accessibilityIdentifier("launcher-game-files-recovery")
+    }
+
+    private func chooseFile() {
+        DocumentPicker.choose(types: [.zip]) { result in
+            switch result {
+            case let .success(urls):
+                if let url = urls.first { Task { await download.importChosen(url) } }
+            case let .failure(error): fileIssue = error.localizedDescription
+            }
+        }
     }
 }

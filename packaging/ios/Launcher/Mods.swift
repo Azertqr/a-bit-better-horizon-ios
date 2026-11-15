@@ -144,7 +144,6 @@ final class ModStore: ObservableObject {
 
 struct ModsPage: View {
     @StateObject private var store = ModStore()
-    @State private var picking = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -176,22 +175,23 @@ struct ModsPage: View {
                     .font(Theme.sans(12)).foregroundStyle(Theme.text)
             }
             PrimaryButton(title: store.installing ? "Installing…" : "Install .hmod",
-                          icon: "square.and.arrow.down") { picking = true }
-                .disabled(store.installing)
-                .accessibilityIdentifier("mods-install-button")
+                          icon: "square.and.arrow.down") {
+                DocumentPicker.choose(types: [.data, .item], many: true) { result in
+                    switch result {
+                    case let .success(urls): Task { await store.install(urls: urls) }
+                    case let .failure(error):
+                        Task { @MainActor in store.failed = error.localizedDescription }
+                    }
+                }
+            }
+            .disabled(store.installing)
+            .accessibilityIdentifier("mods-install-button")
             SecondaryButton(title: "Open Mod Folder", icon: "folder") {
                 FilesOpener.open(URL(fileURLWithPath: store.folder, isDirectory: true))
             }
             .accessibilityIdentifier("mods-open-folder")
             Text("Changes apply after Quit Game → Play, or after reopening the app. Native .hnmod mods are compiled into the game and cannot be installed here.")
                 .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
-        }
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.data, .item],
-                      allowsMultipleSelection: true) { result in
-            switch result {
-            case .success(let urls): Task { await store.install(urls: urls) }
-            case .failure(let error): store.failed = error.localizedDescription
-            }
         }
         .task { await store.reload() }
     }

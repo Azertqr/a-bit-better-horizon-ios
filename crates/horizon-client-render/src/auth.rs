@@ -14,11 +14,42 @@ pub const DEFAULT_DISCOVERY: &str = "https://discovery.minecraftservices.com/min
 /// A session file older than this is refused: it can't be replayed later.
 const MAX_SESSION_FILE_AGE: Duration = Duration::from_secs(120);
 
+/// Which service issued the account's token. Only a Microsoft account may call the Minecraft services
+/// (profile, chat keys, Realms); an Ely.by account joins servers through Ely.by's own session server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Provider {
+    #[default]
+    Microsoft,
+    ElyBy,
+}
+
+/// Ely.by's session server: `POST /session/join`, the legacy Yggdrasil body (accessToken, selectedProfile,
+/// serverId), the same one `join_request` builds. `HORIZON_ELYBY_SESSION` overrides it for tests.
+pub const ELYBY_JOIN: &str = "https://authserver.ely.by/session/join";
+/// Ely.by's legacy Yggdrasil `GET /session/hasJoined`: the question a server asks about a joining
+/// player. `HORIZON_ELYBY_HAS_JOINED` overrides it for tests.
+pub const ELYBY_HAS_JOINED: &str = "https://authserver.ely.by/session/hasJoined";
+
+fn elyby_join_url() -> String {
+    std::env::var("HORIZON_ELYBY_SESSION")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| ELYBY_JOIN.to_owned())
+}
+
+fn elyby_has_joined_url() -> String {
+    std::env::var("HORIZON_ELYBY_HAS_JOINED")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| ELYBY_HAS_JOINED.to_owned())
+}
+
 /// A signed-in account (vanilla's User with type msa).
 pub struct AuthSession {
     pub name: String,
     pub uuid: u128,
     pub xuid: Option<String>,
+    pub provider: Provider,
     access_token: String,
 }
 impl std::fmt::Debug for AuthSession {
@@ -46,12 +77,18 @@ impl AuthSession {
             name: name.to_owned(),
             uuid,
             xuid: None,
+            provider: Provider::Microsoft,
             access_token: access_token.to_owned(),
         }
     }
 
     pub fn access_token(&self) -> &str {
         &self.access_token
+    }
+
+    /// Whether the Minecraft services (profile, chat keys, Realms) accept this account's token.
+    pub fn is_microsoft(&self) -> bool {
+        self.provider == Provider::Microsoft
     }
     /// The session file's JSON: {"name", "uuid", "access_token", "user_type": "msa", "xuid"}.
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -68,13 +105,18 @@ impl AuthSession {
         let access_token = field("access_token")
             .filter(|t| !t.is_empty())
             .ok_or("the session has no access token")?;
-        if field("user_type").is_some_and(|t| t != "msa") {
-            return Err("the session is not a Microsoft account session".into());
-        }
+        let provider = match field("user_type") {
+            None | Some("msa") => Provider::Microsoft,
+            Some("elyby") => Provider::ElyBy,
+            Some(_) => {
+                return Err("the session is not a Microsoft or Ely.by account session".into());
+            }
+        };
         Ok(Self {
             name: name.to_owned(),
             uuid,
             xuid: field("xuid").map(str::to_owned),
+            provider,
             access_token: access_token.to_owned(),
         })
     }
@@ -252,6 +294,9 @@ pub fn endpoint(doc: &serde_json::Value, service: &str, name: &str) -> Option<St
 /// to no actions, as vanilla does. Blocks: call it off the main thread.
 pub fn fetch_account_status(session: &AuthSession) -> crate::ban_notice::AccountStatus {
     use crate::ban_notice::{AccountStatus, parse_profile_actions, parse_properties};
+    if !session.is_microsoft() {
+        return AccountStatus::default();
+    }
     let Ok(doc) = discovery() else {
         return AccountStatus::default();
     };
@@ -355,8 +400,12 @@ fn join_server_with_agent(
     server_hash: &str,
     agent: &ureq::Agent,
 ) -> Result<(), JoinError> {
-    let doc = discovery_with_agent(agent)?;
-    let url = endpoint(&doc, "session", "join").ok_or(JoinError::Unavailable)?;
+    let url = if session.provider == Provider::ElyBy {
+        elyby_join_url()
+    } else {
+        let doc = discovery_with_agent(agent)?;
+        endpoint(&doc, "session", "join").ok_or(JoinError::Unavailable)?
+    };
     match agent
         .post(&url)
         .set("Content-Type", "application/json; charset=utf-8")
@@ -525,6 +574,10 @@ pub fn prepare_chat_keys(now: bool) {
 
 /// Prepare keys for this player, independently of the other local accounts.
 pub fn prepare_chat_keys_for(session: Arc<AuthSession>, now: bool) {
+    // Chat signing keys come from Mojang's services; an Ely.by token is not accepted there.
+    if !session.is_microsoft() {
+        return;
+    }
     let uuid = session.uuid;
     let mut accounts = CHAT_KEYS.lock().unwrap();
     let keys = accounts.entry(uuid).or_default();
@@ -581,6 +634,9 @@ const MINECRAFT_PROFILE: &str = "https://api.minecraftservices.com/minecraft/pro
 /// Single-player and integrated servers often send no `textures` property, or
 /// one without the equipped cape; the client asks the profile endpoint once.
 pub fn own_textures(session: &AuthSession) -> Option<crate::skins::Textures> {
+    if !session.is_microsoft() {
+        return None;
+    }
     let response = agent()
         .get(MINECRAFT_PROFILE)
         .set("Authorization", &format!("Bearer {}", session.access_token))
@@ -638,6 +694,34 @@ pub fn has_joined(
     }
     let separator = if url.contains('?') { '&' } else { '?' };
     let body = match agent().get(&format!("{url}{separator}{query}")).call() {
+        Ok(response) => response.into_string().unwrap_or_default(),
+        Err(ureq::Error::Status(status, response)) => {
+            let error =
+                JoinError::from_response(status, &response.into_string().unwrap_or_default());
+            return match error {
+                JoinError::Unavailable => Err(error),
+                _ => Ok(None),
+            };
+        }
+        Err(ureq::Error::Transport(_)) => return Err(JoinError::Unavailable),
+    };
+    Ok(parse_joined(&body))
+}
+
+/// Ely.by's answer to the same question as [`has_joined`]: whether `name` joined the server whose
+/// hash is `server_hash`, through Ely.by's session server (a third-party Yggdrasil service; the
+/// Mojang services know nothing about its players). `Ok(None)`: it didn't, or the service said no.
+pub fn elyby_has_joined(
+    name: &str,
+    server_hash: &str,
+) -> Result<Option<JoinedProfile>, JoinError> {
+    let url = format!(
+        "{}?username={}&serverId={}",
+        elyby_has_joined_url(),
+        url_encode(name),
+        url_encode(server_hash)
+    );
+    let body = match agent().get(&url).call() {
         Ok(response) => response.into_string().unwrap_or_default(),
         Err(ureq::Error::Status(status, response)) => {
             let error =
@@ -714,6 +798,25 @@ mod tests {
         ] {
             assert_eq!(joined(&[Err(refused.clone())]), (Err(refused), 1));
         }
+    }
+
+    #[test]
+    fn an_elyby_session_is_kept_apart_from_microsoft_services() {
+        let text = r#"{"name":"Ann","uuid":"069a79f444e94726a5befca90e38aaf5","access_token":"t","user_type":"elyby"}"#;
+        let s = AuthSession::parse(text).unwrap();
+        assert_eq!(s.provider, Provider::ElyBy);
+        assert!(!s.is_microsoft());
+        assert!(
+            AuthSession::parse(&text.replace("elyby", "msa"))
+                .unwrap()
+                .is_microsoft()
+        );
+        assert!(AuthSession::new("Ann", UUID, "t").is_microsoft());
+        assert_eq!(
+            fetch_account_status(&s),
+            crate::ban_notice::AccountStatus::default()
+        );
+        assert!(own_textures(&s).is_none());
     }
 
     /// base64url without padding, as a JWT's parts are.

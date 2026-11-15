@@ -1,7 +1,9 @@
 //! Touch controls for phones and tablets (Horizon's own), after Minecraft: Pocket Edition's: a D-pad (or an
 //! analog stick) on the left, jump on the right, perspective, chat and pause at the top, and the hotbar and
 //! an inventory button along the bottom. A finger anywhere else turns the view; a short tap uses (or attacks
-//! the entity under the crosshair), and holding still mines.
+//! the entity under the crosshair), and holding still mines. A button that is held keeps its keys down while
+//! the same finger drags, so one thumb can hold attack and turn the view (the D-pad and stick keep their own
+//! gestures).
 //!
 //! This module is the layout and the fingers' state: positions in GUI pixels in, [`Out`]s for the game to act
 //! on out. game/touch.rs feeds it winit's touches and acts on what comes back.
@@ -81,6 +83,19 @@ const MARGIN: f32 = 14.0;
 /// How far above the hotbar its slots still take a tap: a thumb lands high.
 const HOTBAR_REACH: f32 = 8.0;
 
+/// Whether a button is one of the menu pad's: the D-pad, Sneak and Jump.
+fn menu_control(control: Control) -> bool {
+    matches!(
+        control,
+        Control::Forward
+            | Control::Back
+            | Control::Left
+            | Control::Right
+            | Control::Sneak
+            | Control::Jump
+    )
+}
+
 /// Where every button is on a `w` x `h` GUI-pixel screen.
 pub fn layout(w: f32, h: f32) -> Vec<(Control, Rect)> {
     let s = button_size(h);
@@ -157,10 +172,14 @@ pub fn hit(layout: &[(Control, Rect)], at: (f32, f32)) -> Option<Control> {
 
 /// Horizon's touch overlay settings (`horizon-touch.txt`).
 pub const FILE: &str = "horizon-touch.txt";
+/// The menu pad's layout (`horizon-touch-menu.txt`): a system layout, not a profile.
+pub const MENU_FILE: &str = "horizon-touch-menu.txt";
 /// The layouts other than the active one: one file each, by name.
 pub const LAYOUTS_DIR: &str = "touch-layouts";
 /// The layout every player starts with.
 pub const DEFAULT_PROFILE: &str = "Default";
+/// The name the menus' system layout goes by.
+pub const MENU_PROFILE: &str = "Interaction";
 pub const MAX_PROFILE_NAME: usize = 16;
 
 /// A layout profile's name, which is also its file's stem (so it shows in the Files app): letters,
@@ -575,6 +594,29 @@ impl TouchSettings {
             Err(_) => Self::default(),
         }
     }
+    /// The menu pad's own layout: the default D-pad arrangement under [`MENU_PROFILE`].
+    pub fn menu_default() -> Self {
+        Self {
+            profile: MENU_PROFILE.to_owned(),
+            ..Self::default()
+        }
+    }
+    /// [`TouchSettings::load`] for the menu pad's system layout (`horizon-touch-menu.txt`). Menus step
+    /// between targets, so this layout is the D-pad's whatever its file says: it never has a stick.
+    pub fn load_menu(dir: &Path) -> Self {
+        let mut s = fs::read_to_string(dir.join(MENU_FILE))
+            .map_or_else(|_| Self::menu_default(), |text| Self::parse(&text));
+        s.profile = MENU_PROFILE.to_owned();
+        s.movement = Movement::DPad;
+        s
+    }
+    /// [`TouchSettings::save`] for the menu pad's layout: written once it differs from its defaults.
+    pub fn save_menu(&self, dir: &Path) {
+        let path = dir.join(MENU_FILE);
+        if *self != Self::menu_default() || path.exists() {
+            let _ = fs::write(path, self.serialize());
+        }
+    }
     /// Written once something differs from the defaults, so players who never touch the overlay get no new
     /// file.
     pub fn save(&self, dir: &Path) {
@@ -779,6 +821,49 @@ impl TouchSettings {
     pub fn editor_layout(&self, w: f32, h: f32) -> Vec<(Control, Rect)> {
         self.layout_at(w, h, true)
     }
+    /// The buttons that drive a screen's pointer (game/touch.rs): the D-pad, Sneak and Jump, where the
+    /// player put them and at their sizes, and any buttons the player added to this layout. They come
+    /// from the D-pad template whatever this layout's movement is: a screen steps from slot to slot and
+    /// button to button rather than steering, so a menu never gets a stick.
+    pub fn menu_layout(&self, w: f32, h: f32) -> Vec<(Control, Rect)> {
+        let mut v = layout(w, h);
+        v.retain(|(control, _)| menu_control(*control) && self.visible(*control));
+        self.styled_at(&mut v, w, h);
+        self.custom_at(w, h, &mut v);
+        v
+    }
+    /// [`TouchSettings::menu_layout`] with the buttons the player turned off still in place: the menu
+    /// layout's editor shows them faintly so a long press can turn them back on.
+    pub fn menu_editor_layout(&self, w: f32, h: f32) -> Vec<(Control, Rect)> {
+        let mut v = layout(w, h);
+        v.retain(|(control, _)| menu_control(*control));
+        self.styled_at(&mut v, w, h);
+        self.custom_at(w, h, &mut v);
+        v
+    }
+    /// The player's own buttons at their placements, each its own size, added after the built-in ones.
+    fn custom_at(&self, w: f32, h: f32, v: &mut Vec<(Control, Rect)>) {
+        let base = button_size(h);
+        for (id, button) in &self.buttons {
+            let side = |v: f32| {
+                (base * v.clamp(MIN_SIZE, MAX_SIZE))
+                    .round()
+                    .max(1.0)
+            };
+            let (bw, bh) = (side(button.width), side(button.height));
+            let x = button.placement.x * (w - bw).max(0.0);
+            let y = button.placement.y * (h - bh).max(0.0);
+            v.push((
+                Control::Custom(*id),
+                [
+                    x.clamp(0.0, (w - bw).max(0.0)),
+                    y.clamp(0.0, (h - bh).max(0.0)),
+                    bw,
+                    bh,
+                ],
+            ));
+        }
+    }
     fn layout_at(&self, w: f32, h: f32, hidden_too: bool) -> Vec<(Control, Rect)> {
         let mut v = layout(w, h);
         if self.movement == Movement::Stick {
@@ -799,7 +884,14 @@ impl TouchSettings {
         if !hidden_too {
             v.retain(|(control, _)| self.visible(*control));
         }
-        for (control, r) in &mut v {
+        self.styled_at(&mut v, w, h);
+        self.custom_at(w, h, &mut v);
+        v
+    }
+    /// A built-in button's own size and the player's placement, applied in place. The hotbar follows the
+    /// HUD and keeps the size it is drawn at.
+    fn styled_at(&self, v: &mut [(Control, Rect)], w: f32, h: f32) {
+        for (control, r) in v.iter_mut() {
             if matches!(control, Control::Hotbar(_)) {
                 continue;
             }
@@ -825,28 +917,6 @@ impl TouchSettings {
                 bh,
             ];
         }
-        // The player's buttons, after the built-in ones: each its own size.
-        let base = button_size(h);
-        for (id, button) in &self.buttons {
-            let side = |v: f32| {
-                (base * v.clamp(MIN_SIZE, MAX_SIZE))
-                    .round()
-                    .max(1.0)
-            };
-            let (bw, bh) = (side(button.width), side(button.height));
-            let x = button.placement.x * (w - bw).max(0.0);
-            let y = button.placement.y * (h - bh).max(0.0);
-            v.push((
-                Control::Custom(*id),
-                [
-                    x.clamp(0.0, (w - bw).max(0.0)),
-                    y.clamp(0.0, (h - bh).max(0.0)),
-                    bw,
-                    bh,
-                ],
-            ));
-        }
-        v
     }
     pub fn visible(&self, control: Control) -> bool {
         matches!(
@@ -1291,7 +1361,14 @@ impl Touches {
                     *control = next;
                 }
             }
-            Kind::Button(_) => {}
+            Kind::Button(_) => {
+                // The held key stays down; dragging the same finger turns the view, so a
+                // button bound to attack can aim with one thumb.
+                let (dx, dy) = (at.0 - f.start.0, at.1 - f.start.1);
+                if dx.hypot(dy) > SLOP {
+                    out.push(Out::Look(at.0 - f.last.0, at.1 - f.last.1));
+                }
+            }
             Kind::Swipe { control, pressed } => {
                 let inside = layout
                     .iter()
@@ -1512,6 +1589,48 @@ mod tests {
         );
         assert_eq!(t.frame(5.0), []);
         assert_eq!(t.end(1), []);
+    }
+
+    #[test]
+    fn a_held_button_holds_its_keys_while_the_same_finger_turns_the_view() {
+        let l = layout(633.0, 292.0);
+        let mut t = Touches::default();
+        // A point on the Jump button, well inside it.
+        assert_eq!(
+            t.start(1, (600.0, 200.0), 0.0, &l, NO_SWIPES),
+            [Out::Press(Control::Jump)]
+        );
+        // A thumb's wobble is not a drag.
+        assert_eq!(t.moved(1, (604.0, 200.0), &l, NO_SWIPES), []);
+        // Past the slop the view follows the finger, and the key stays held.
+        assert_eq!(
+            t.moved(1, (630.0, 200.0), &l, NO_SWIPES),
+            [Out::Look(26.0, 0.0)]
+        );
+        assert_eq!(
+            t.moved(1, (630.0, 188.0), &l, NO_SWIPES),
+            [Out::Look(0.0, -12.0)]
+        );
+        assert!(t.held(Control::Jump));
+        assert_eq!(t.end(1), [Out::Release(Control::Jump)]);
+    }
+
+    #[test]
+    fn the_dpad_and_the_stick_do_not_look_while_their_finger_moves() {
+        let l = layout(633.0, 292.0);
+        let mut t = Touches::default();
+        let left = at(&l, Control::Left);
+        t.start(1, left, 0.0, &l, NO_SWIPES);
+        // The D-pad slides between directions instead.
+        let out = t.moved(1, (left.0 + 30.0, left.1), &l, NO_SWIPES);
+        assert!(out.iter().all(|o| !matches!(o, Out::Look(..))));
+
+        let stick = stick_settings().layout(633.0, 292.0);
+        let r = placed(&stick, Control::Stick);
+        let centre = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        t.start(2, centre, 0.0, &stick, NO_SWIPES);
+        let out = t.moved(2, (centre.0 + 40.0, centre.1), &stick, NO_SWIPES);
+        assert!(out.iter().all(|o| !matches!(o, Out::Look(..))));
     }
 
     #[test]
@@ -1958,6 +2077,102 @@ mod tests {
         assert_eq!(
             placed(&editor, Control::Chat),
             placed(&layout(600.0, 300.0), Control::Chat)
+        );
+    }
+
+    #[test]
+    fn a_menu_gets_only_the_dpad_sneak_and_jump() {
+        let mut s = TouchSettings::default();
+        let controls = |s: &TouchSettings| -> Vec<Control> {
+            s.menu_layout(600.0, 300.0)
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect()
+        };
+        let mut expected = vec![
+            Control::Forward,
+            Control::Left,
+            Control::Sneak,
+            Control::Right,
+            Control::Back,
+            Control::Jump,
+        ];
+        assert_eq!(controls(&s), expected);
+        // Where the player put a button is where the menu gets it.
+        s.set_placement(Control::Jump, 0.1, 0.2);
+        assert_eq!(
+            placed(&s.menu_layout(600.0, 300.0), Control::Jump),
+            placed(&s.layout(600.0, 300.0), Control::Jump)
+        );
+        // A stick layout still gets the D-pad: a menu steps rather than steers. A hidden button stays away.
+        s.movement = Movement::Stick;
+        s.set_hidden(Control::Sneak, true);
+        expected.retain(|c| *c != Control::Sneak);
+        assert_eq!(controls(&s), expected);
+        // The player's own buttons are part of the menus' layout too, where the player put them and
+        // at their sizes.
+        let id = s.add_button(600.0, 300.0);
+        s.set_placement(Control::Custom(id), 0.25, 0.75);
+        let menu = s.menu_layout(600.0, 300.0);
+        assert!(menu.iter().any(|(c, _)| *c == Control::Custom(id)));
+        assert_eq!(
+            placed(&menu, Control::Custom(id)),
+            placed(&s.layout(600.0, 300.0), Control::Custom(id))
+        );
+    }
+
+    #[test]
+    fn the_menu_editor_shows_the_six_buttons_never_a_stick() {
+        let mut s = TouchSettings::menu_default();
+        assert_eq!(s.profile, MENU_PROFILE);
+        assert_eq!(s.movement, Movement::DPad);
+        let menu: Vec<Control> = s
+            .menu_editor_layout(600.0, 300.0)
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(menu.len(), 6);
+        assert!(!menu.contains(&Control::Stick));
+        // A hidden button stays in the editor so it can be turned back on.
+        s.set_hidden(Control::Jump, true);
+        let menu: Vec<Control> = s
+            .menu_editor_layout(600.0, 300.0)
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert!(menu.contains(&Control::Jump));
+        // A file that says "stick" still gets the D-pad: menus never steer.
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-touch-menu-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join(MENU_FILE), "profile:Interaction\nmovement:stick\n").unwrap();
+        let loaded = TouchSettings::load_menu(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(loaded.movement, Movement::DPad);
+        assert_eq!(loaded.profile, MENU_PROFILE);
+        // Buttons the player adds are the layout's own: the editor shows them, and they survive a save.
+        let mut s = TouchSettings::menu_default();
+        let id = s.add_button(600.0, 300.0);
+        s.set_button_key(id, 0, Some("key.keyboard.t".to_owned()));
+        s.set_button_name(id, "Chat".to_owned());
+        assert!(s
+            .menu_editor_layout(600.0, 300.0)
+            .iter()
+            .any(|(c, _)| *c == Control::Custom(id)));
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-touch-menu-buttons-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        s.save_menu(&dir);
+        let loaded = TouchSettings::load_menu(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(loaded.button(id), s.button(id));
+        assert_eq!(
+            loaded.button_key_name(id, 0),
+            Some("key.keyboard.t")
         );
     }
 

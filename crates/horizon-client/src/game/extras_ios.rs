@@ -19,9 +19,14 @@ use std::time::Duration;
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 // The PvP and HUD glue is shared with the desktop extras: iOS had it as a top-level game module
-// before the extras layer moved it under `extras/`.
+// before the extras layer moved it under `extras/`. The inventory extras too: their state lives
+// in `Game`, only the hooks are here.
 #[path = "extras/pvp.rs"]
 pub(in crate::game) mod pvp;
+#[path = "extras/mouse_tweaks.rs"]
+pub(in crate::game) mod mouse_tweaks;
+#[path = "extras/sorting.rs"]
+mod sorting;
 
 #[derive(Default)]
 pub(super) struct ExtrasState {

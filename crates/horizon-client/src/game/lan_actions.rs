@@ -8,8 +8,10 @@
 use super::{
     Dim, Game, GuestUse, Hit, InteractTarget, Mining, Screen,
     building_players::{BuildingPlayer, BuildingPlayers, HubBodies, shared},
+    combat,
     lan::LanHost,
     lan_crafting::MenuRemoval,
+    lan_particles,
     respawn_anchor::RespawnConfig,
 };
 use horizon_client::{
@@ -51,7 +53,7 @@ pub(super) struct GuestPlay {
     destroy_delay: u32,
     using: Option<(usize, u32)>,
     use_duration: i32,
-    use_ticks_set: bool,
+    use_start: super::using_item::UseStart,
     use_delay: u32,
     /// The shield's ItemCooldowns entry: an axe disabled it for this many ticks.
     pub(super) shield_cooldown: u32,
@@ -199,7 +201,7 @@ pub(super) struct GuestSwap {
     destroy_delay: u32,
     using: Option<(usize, u32)>,
     use_duration: i32,
-    use_ticks_set: bool,
+    use_start: super::using_item::UseStart,
     use_delay: u32,
     pub(super) shield_cooldown: u32,
     /// The guest's item cooldowns (`Game::cooldowns` for its turn).
@@ -312,17 +314,6 @@ pub(super) fn guest_within_entity_range(
     let range = if g.creative() { 5.0 } else { 3.0 } + buffer;
     d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < range * range
 }
-fn direction(face: i32) -> [i32; 3] {
-    match face {
-        0 => [0, -1, 0],
-        1 => [0, 1, 0],
-        2 => [0, 0, -1],
-        3 => [0, 0, 1],
-        4 => [-1, 0, 0],
-        _ => [1, 0, 0],
-    }
-}
-
 /// The windows a guest has open besides their inventory: the block or mod
 /// container, the crafting table, a station, a lectern, a merchant, a mount.
 fn guest_open_windows(host: &LanHost, conn: u32) -> Vec<i32> {
@@ -346,8 +337,7 @@ fn building_player(g: &horizon_client::lan::guest::Guest) -> BuildingPlayer {
     BuildingPlayer {
         conn: Some(g.conn),
         dimension: Dim::from_id(&g.dimension),
-        bounds: (g.loaded && super::building_players::guest_body_present(g) && !g.spectator())
-            .then(|| g.bounds()),
+        bounds: (g.placed && g.loaded && !g.dead && !g.spectator()).then(|| g.bounds()),
         borrowed: false,
     }
 }
@@ -490,17 +480,7 @@ impl Game<'_> {
             bounds: self
                 .player
                 .as_ref()
-                .filter(|p| {
-                    !self.spectator()
-                        && match self.lan_acting {
-                            Some(ancestor) => host
-                                .hub
-                                .guest(ancestor)
-                                .is_some_and(super::building_players::guest_body_present),
-                            // Unassociated client/legacy bodies have no guest lifecycle record.
-                            None => !p.health.dead_or_dying(),
-                        }
-                })
+                .filter(|p| !self.spectator() && !p.health.dead_or_dying())
                 .map(PlayerMotion::bounds),
             borrowed: true,
         };
@@ -624,7 +604,7 @@ impl Game<'_> {
         let destroy_delay = std::mem::replace(&mut self.destroy_delay, play.destroy_delay);
         let using = std::mem::replace(&mut self.using, play.using.take());
         let use_duration = std::mem::replace(&mut self.use_duration, play.use_duration);
-        let use_ticks_set = std::mem::replace(&mut self.use_ticks_set, play.use_ticks_set);
+        let use_start = std::mem::replace(&mut self.use_start, std::mem::take(&mut play.use_start));
         let use_delay = std::mem::replace(&mut self.use_delay, play.use_delay);
         let shield_cooldown = std::mem::replace(&mut self.shield_cooldown, play.shield_cooldown);
         let cooldowns = std::mem::replace(&mut self.cooldowns, std::mem::take(&mut play.cooldowns));
@@ -752,7 +732,7 @@ impl Game<'_> {
             destroy_delay,
             using,
             use_duration,
-            use_ticks_set,
+            use_start,
             use_delay,
             shield_cooldown,
             cooldowns,
@@ -854,7 +834,7 @@ impl Game<'_> {
             destroy_delay,
             using,
             use_duration,
-            use_ticks_set,
+            use_start,
             use_delay,
             shield_cooldown,
             cooldowns,
@@ -1013,7 +993,7 @@ impl Game<'_> {
         play.destroy_delay = std::mem::replace(&mut self.destroy_delay, destroy_delay);
         play.using = std::mem::replace(&mut self.using, using);
         play.use_duration = std::mem::replace(&mut self.use_duration, use_duration);
-        play.use_ticks_set = std::mem::replace(&mut self.use_ticks_set, use_ticks_set);
+        play.use_start = std::mem::replace(&mut self.use_start, use_start);
         play.use_delay = std::mem::replace(&mut self.use_delay, use_delay);
         play.shield_cooldown = std::mem::replace(&mut self.shield_cooldown, shield_cooldown);
         play.cooldowns = std::mem::replace(&mut self.cooldowns, cooldowns);
@@ -1641,11 +1621,6 @@ impl Game<'_> {
         }
         // ServerPlayer.openMenu closes the menu that was open.
         self.guest_close_all(host, conn);
-        // Reopening the same vehicle can close its last viewer above. Keep
-        // the live snapshot available for the new menu in that case too.
-        self.world
-            .block_entities
-            .get_or_insert_with(pos, || BlockEntity::Chest(items.clone()));
         host.hub
             .open_container(conn, menu, title, pos, slots, items, None);
         true
@@ -1759,23 +1734,21 @@ impl Game<'_> {
 
     /// `ContainerEntity`'s `Container.stopOpen` when a vehicle menu closes
     /// (`AbstractChestBoat.stopOpen` / `MinecartChest.stopOpen`): the menu's
-    /// slots go back to the vehicle, the last viewer releases the shared
-    /// placeholder, and CONTAINER_CLOSE fires at the vehicle with
+    /// slots go back to the vehicle, the shared placeholder leaves
+    /// `world.block_entities`, and CONTAINER_CLOSE fires at the vehicle with
     /// the closing player as the source. A hopper minecart keeps
     /// `Container.stopOpen`'s no-op. Called by the close packet and by the
     /// `ServerPlayer.tick` reach/destroyed close.
     fn close_guest_vehicle_menu(&mut self, host: &LanHost, conn: u32, key: (i32, i32, i32)) {
         self.store_cart_items(key);
-        // Both the owner's window and other placed viewers in this level
-        // share the same live inventory. Release it only after the last closes.
-        let another_viewer = Self::vehicle_has_other_viewers(
+        let other_viewers = Self::vehicle_has_other_viewers(
             self.container,
             &host.hub.guests,
             Some(conn),
             key,
             self.dim.id(),
         );
-        if !another_viewer {
+        if !other_viewers {
             self.world.block_entities.remove(&key);
         }
         let at = if let Some(b) = self.boats.iter().find(|b| b.id as i32 == key.2) {
@@ -1842,28 +1815,6 @@ impl Game<'_> {
                     k.1 == super::minecarts::CART_KEY_Y && !self.chest_vehicle_still_valid(k.2, g)
                 })
         })
-    }
-
-    /// ServerPlayer.containerMenu.containerId: zero belongs to the player
-    /// inventory only when no other menu is open. Cached crafting-machine
-    /// views are not owners; their window belongs to the hub's block menu.
-    fn guest_menu_window(&self, host: &LanHost, conn: u32) -> i32 {
-        host.hub
-            .guest(conn)
-            .and_then(|g| g.menu.as_ref().map(|m| m.window))
-            .or_else(|| {
-                host.play.get(&conn).and_then(|p| {
-                    p.crafting
-                        .table
-                        .as_ref()
-                        .map(|t| t.0)
-                        .or_else(|| p.station.as_ref().map(|m| m.window))
-                        .or_else(|| p.merchant.as_ref().map(|m| m.window))
-                        .or_else(|| p.lectern.as_ref().map(|m| m.window))
-                        .or_else(|| p.mount_window.as_ref().map(|m| m.window))
-                })
-            })
-            .unwrap_or(0)
     }
 
     /// `AbstractContainerMenu.stillValid` of whatever menu the guest has open
@@ -2137,19 +2088,6 @@ impl Game<'_> {
         {
             return;
         }
-        // Check ownership before any click, recipe or native-hook dispatch.
-        // A stale window-zero packet must not operate the inventory behind
-        // an open chest, station, trade, lectern or mount menu.
-        let addressed_window = match &packet {
-            S::ContainerClick(p) => Some(p.container),
-            S::ContainerButtonClick(p) => Some(p.container),
-            S::ContainerSlotStateChanged(p) => Some(p.container),
-            S::PlaceRecipe(p) => Some(p.container),
-            _ => None,
-        };
-        if addressed_window.is_some_and(|window| window != self.guest_menu_window(host, conn)) {
-            return;
-        }
         if matches!(
             packet,
             S::ContainerClick(_)
@@ -2195,7 +2133,7 @@ impl Game<'_> {
                     {
                         return;
                     }
-                    let face = direction(i32::from(a.direction));
+                    let face = super::hit::direction(i32::from(a.direction));
                     // Native mods, once the dig may start: a canceled click
                     // attacks, digs and breaks nothing (the ack puts the
                     // block back on the client).
@@ -2329,7 +2267,7 @@ impl Game<'_> {
                                 {
                                     g.native_player_ready_arrow(uuid, &name, &arrow);
                                 }
-                                g.release_used_item(&stack, ticks, false);
+                                g.release_using_item(&stack, ticks);
                                 if listening {
                                     g.native_player_stop_using_item(uuid, &name);
                                 }
@@ -2363,13 +2301,11 @@ impl Game<'_> {
                     let slot = g.selected;
                     std::mem::swap(&mut g.inventory[slot], &mut g.offhand);
                     let (offhand, main) = (g.offhand.clone(), g.inventory[slot].clone());
-                    if let Some(play) = host.play.get_mut(&conn) {
-                        play.using = None;
-                    }
-                    // setItemInHand: the off hand, then the main hand.
+                    // setItemInHand: the off hand, then the main hand, then stopUsingItem.
                     self.as_guest(host, conn, |g| {
                         g.player_on_equip("offhand", main.as_ref(), offhand.as_ref());
                         g.player_on_equip("mainhand", offhand.as_ref(), main.as_ref());
+                        g.stop_using();
                     });
                     let guest = &host.hub.guests[gi];
                     self.native_player_swap_with_equipment_slot(guest.uuid, &guest.name, "offhand");
@@ -2413,13 +2349,13 @@ impl Game<'_> {
                 let g = &mut host.hub.guests[gi];
                 let changed = g.selected != p.slot as usize;
                 g.selected = p.slot as usize;
-                if let Some(play) = host.play.get_mut(&conn)
-                    && changed
+                if changed
+                    && let Some(play) = host.play.get(&conn)
                     && play
                         .using
                         .is_some_and(|(slot, _)| slot != super::shield::OFFHAND_SLOT)
                 {
-                    play.using = None;
+                    self.as_guest(host, conn, |g| g.stop_using());
                 }
             }
             // ServerGamePacketListenerImpl.handlePunch: the main hand swings
@@ -2465,16 +2401,7 @@ impl Game<'_> {
                     self.lan_log_event(horizon_client::lan::hub::HostEvent::Warn(line));
                     return;
                 }
-                let face = direction(p.face);
-                let hit = Hit {
-                    pos: p.pos,
-                    face,
-                    point: [
-                        f64::from(p.pos[0]) + f64::from(p.cursor[0]),
-                        f64::from(p.pos[1]) + f64::from(p.cursor[1]),
-                        f64::from(p.pos[2]) + f64::from(p.cursor[2]),
-                    ],
-                };
+                let hit = Hit::from_use_item_on(&p);
                 let hand = if p.hand == 1 { Hand::Off } else { Hand::Main };
                 // handleUseItemOn: above or below the world nothing is used and
                 // the player is told the limit (the blocks are not resent);
@@ -2547,10 +2474,7 @@ impl Game<'_> {
                     self.build_limit_message(host, conn, true, max_y);
                 }
                 // The client predicted a result: correct it with what really is.
-                for pos in [
-                    p.pos,
-                    [p.pos[0] + face[0], p.pos[1] + face[1], p.pos[2] + face[2]],
-                ] {
+                for pos in [p.pos, hit.beside()] {
                     let state = self.world.block(pos[0], pos[1], pos[2]).0 as i32;
                     host.hub
                         .send_to(conn, &C::BlockUpdate(play::BlockUpdate { pos, state }));
@@ -2643,15 +2567,6 @@ impl Game<'_> {
                         location: p.location,
                     };
                     let swung = self.as_guest(host, conn, |g| {
-                        // handleInteract uses the packet's secondary action.
-                        // Newer movement input may already have released sneak
-                        // while this click waited in the server action queue.
-                        // as_guest restores keys without changing that input.
-                        if p.secondary {
-                            g.keys.insert(KeyCode::ShiftLeft);
-                        } else {
-                            g.keys.remove(&KeyCode::ShiftLeft);
-                        }
                         g.guest_use = Some(GuestUse::Entity(hand, target));
                         let swings = g.swings_started;
                         let _ = g.use_item();
@@ -2792,6 +2707,16 @@ impl Game<'_> {
             }
             S::SetBeacon(p) => self.lan_station_beacon(host, conn, p.primary, p.secondary),
             S::SelectTrade(p) => self.lan_select_trade(host, conn, p.item),
+            S::ContainerClose(p) if self.lan_merchant_closed(host, conn, Some(p.container)) => {
+                self.guest_carried_back(host, gi);
+            }
+            S::ContainerClose(p)
+                if self.lan_crafting_closed(host, conn, Some(p.container))
+                    || self.lan_station_closed(host, conn, Some(p.container))
+                    || self.lan_mount_closed(host, conn, Some(p.container)) =>
+            {
+                self.guest_carried_back(host, gi);
+            }
             S::SelectBundleItem(p) => {
                 // ServerGamePacketListenerImpl.handleBundleItemSelectedPacket: the slot
                 // is the open menu's (#4436).
@@ -2835,14 +2760,31 @@ impl Game<'_> {
                 }
                 self.drop_guest_items(host, gi, drops);
             }
-            S::ContainerClose(_) => {
-                // Java handleContainerClose calls doCloseContainer on the
-                // CURRENT menu, without testing the supplied window ID.
-                // InventoryMenu.removed also returns its crafting grid.
-                if self.guest_menu_window(host, conn) == 0 {
-                    self.lan_crafting_closed(host, conn, Some(0));
+            S::ContainerClose(p) => {
+                // A vehicle's menu closed: its slots go back to the vehicle
+                // (`ContainerEntity`), and a chest boat's `stopOpen` fires
+                // CONTAINER_CLOSE with the player as the source.
+                let vehicle = host.hub.guests[gi]
+                    .menu
+                    .as_ref()
+                    .filter(|m| m.window == p.container)
+                    .and_then(|m| match m.slots {
+                        Slots::Block(key) if key.1 == super::minecarts::CART_KEY_Y => Some(key),
+                        _ => None,
+                    });
+                if host.hub.guests[gi]
+                    .menu
+                    .as_ref()
+                    .is_some_and(|m| m.window == p.container)
+                {
+                    self.guest_container_closed(host, conn);
                 }
-                self.guest_close_all(host, conn);
+                if let Some(key) = vehicle {
+                    self.close_guest_vehicle_menu(host, conn, key);
+                }
+                host.hub.container_closed(conn, p.container);
+                self.native_menu_returned(host, conn, MenuRemoval::Live);
+                self.guest_carried_back(host, gi);
             }
             S::ChatCommand(c) => self.guest_chat_command(host, conn, &c.command),
             S::CustomPayload(p) if p.channel == horizon_protocol::quiet::CHANNEL => {
@@ -3246,7 +3188,7 @@ impl Game<'_> {
 
     /// `AbstractContainerMenu.removed`: what a closing player held on the
     /// cursor goes back into their inventory (`placeItemBackInInventory`,
-    /// dropped if it does not fit or the player disconnected), and the cursor empties
+    /// dropped only if it doesn't fit), and their client's cursor empties
     /// with the inventory it is sent.
     pub(super) fn guest_carried_back(&mut self, host: &mut LanHost, gi: usize) {
         if let Some(c) = host.hub.guests[gi].carried.take() {
@@ -3256,22 +3198,15 @@ impl Game<'_> {
     }
 
     pub(super) fn drop_guest_items(&mut self, host: &LanHost, gi: usize, stacks: Vec<ItemStack>) {
-        self.drop_items_for_guest(&host.hub.guests[gi], stacks);
-    }
-
-    pub(super) fn drop_items_for_guest(
-        &mut self,
-        g: &horizon_client::lan::guest::Guest,
-        stacks: Vec<ItemStack>,
-    ) {
+        let g = &host.hub.guests[gi];
         let eye = [
             g.position[0],
             g.position[1] + g.eye_height() - f64::from(0.3f32),
             g.position[2],
         ];
+        let mut r = horizon_client::random_source::entity(); // the guest's Entity.random
         for stack in stacks {
-            let r = &mut self.world.random;
-            let v = horizon_client::entities::drop_motion(r, g.yaw, g.pitch, false);
+            let v = horizon_client::entities::drop_motion(&mut r, g.yaw, g.pitch, false);
             self.spawn_item(stack, eye, v, 40);
         }
     }
@@ -3822,7 +3757,7 @@ impl Game<'_> {
         self.guest_suggestions(host, conn, &payload);
     }
 
-    fn guest_suggestions(&mut self, host: &mut LanHost, conn: u32, payload: &[u8]) {
+    pub(super) fn guest_suggestions(&mut self, host: &mut LanHost, conn: u32, payload: &[u8]) {
         let mut r = horizon_protocol::buf::Reader::new(payload);
         let (Ok(id), Ok(text)) = (r.varint(), r.string(32500)) else {
             return;
@@ -3838,9 +3773,8 @@ impl Game<'_> {
         let skip = usize::from(text.starts_with('/'));
         let command = &text[skip..];
         let d = vanilla::game_dispatcher_with_features(&self.level.enabled_features);
-        // The completions come from the server's players and lists, not from the host's own registries: a
-        // dedicated server has no local player (they would list "Player"), and a LAN world's guests are not in
-        // the host's list.
+        // Server players and lists, not the host's registries: a dedicated server has no local player.
+        let triggers = super::scoreboard::trigger_objectives_for(&self.score.board, &player_name);
         let mut players = if self.options.dedicated.is_some() {
             Vec::new()
         } else {
@@ -3871,13 +3805,14 @@ impl Game<'_> {
             }
             None => Default::default(),
         };
-        let reg = &mut self.ui.registries;
+        let reg = self.suggestion_registries();
         let level = std::mem::replace(&mut reg.permission, permission);
         let own_players = std::mem::replace(&mut reg.players, players);
         let own_ops = std::mem::replace(&mut reg.ops, ops);
         let own_banned = std::mem::replace(&mut reg.banned_players, banned_players);
         let own_banned_ips = std::mem::replace(&mut reg.banned_ips, banned_ips);
         let own_whitelisted = std::mem::replace(&mut reg.whitelisted, whitelisted);
+        let own_triggers = std::mem::replace(&mut reg.trigger_objectives, triggers);
         let parse = d.parse(command, &self.ui.registries);
         let ((mut start, mut end), mut suggestions) =
             d.suggestions(&parse, command.len(), &self.ui.registries);
@@ -3926,6 +3861,7 @@ impl Game<'_> {
         reg.banned_players = own_banned;
         reg.banned_ips = own_banned_ips;
         reg.whitelisted = own_whitelisted;
+        reg.trigger_objectives = own_triggers;
         // ServerCommandSuggestionsProvider.limitSuggestionCount.
         suggestions.truncate(1000);
         let utf16 = |byte: usize| command[..byte.min(command.len())].encode_utf16().count() as i32;
@@ -3949,7 +3885,6 @@ impl Game<'_> {
             ),
         );
     }
-
     pub(super) fn guest_respawn(&mut self, host: &mut LanHost, conn: u32) {
         let Some(i) = host.hub.guests.iter().position(|g| g.conn == conn) else {
             return;
@@ -4116,7 +4051,7 @@ impl Game<'_> {
             && self.world.loaded(c.pos[0], c.pos[2])
         {
             let found = self
-                .as_guest(host, conn, |g| g.resolve_server_respawn(c))
+                .as_guest(host, conn, |g| g.resolve_server_respawn(c, true))
                 .flatten();
             let world = self
                 .level
@@ -4267,6 +4202,7 @@ impl Game<'_> {
                                 f64::from(pos[1]) + 0.5,
                                 f64::from(pos[2]) + 0.5,
                             ],
+                            inside: false,
                         });
                     }
                     let _ = g.tick_mining();
@@ -4286,17 +4222,6 @@ impl Game<'_> {
                 if digging.is_some()
                     && let Some(play) = host.play.get_mut(&conn)
                     && (host.hub.guests[gi].creative() || play.mining.is_none())
-                {
-                    play.digging = None;
-                }
-                // An instant break (a dead bush, a flower) leaves air where the dig was: the server destroys at
-                // START and records no dig, so nothing goes on being knocked there until the next START.
-                if let Some((pos, _)) = digging
-                    && self
-                        .res
-                        .facts()
-                        .is_air(self.world.block(pos[0], pos[1], pos[2]))
-                    && let Some(play) = host.play.get_mut(&conn)
                 {
                     play.digging = None;
                 }
@@ -4408,7 +4333,7 @@ impl Game<'_> {
 
     /// `ServerPlayer.die` for a guest whose health has run out: the death
     /// message, the loot and experience, the death screen.
-    fn guest_die(&mut self, host: &mut LanHost, gi: usize, conn: u32) {
+    pub(super) fn guest_die(&mut self, host: &mut LanHost, gi: usize, conn: u32) {
         if host.hub.guests[gi].health <= 0.0
             && !host.hub.guests[gi].dead
             && !horizon_client::mod_api::mods().is_empty()
@@ -4545,10 +4470,9 @@ impl Game<'_> {
             if consumed && catalyst_xp > 0 {
                 self.guest_catalyst_trigger(host, gi, conn, at, blow.clone());
             }
-            // ServerPlayer.die: the drops, then the deathCount objectives, then,
-            // with a kill credit, `killed_by` for the killer's type and the
-            // killer's awardKillScore, then the `deaths` statistic and the two
-            // timers it resets.
+            // ServerPlayer.die: the drops, the deathCount objectives, the
+            // experience (`dropAllDeathLoot`), then a kill credit's `killed_by`,
+            // awardKillScore and wither rose, then `deaths` and the two timers.
             self.as_guest(host, conn, |game| {
                 if let Some(eyes) = drops {
                     game.drop_inventory(eyes, (uuid, id));
@@ -4558,16 +4482,17 @@ impl Game<'_> {
                     game.award_stat("killed_by", kind, 1);
                 }
             });
+            // The experience the catalyst took does not drop (`Player.
+            // skipDropExperience`), and `dropAllDeathLoot` drops it before the rose.
+            if !consumed {
+                self.spawn_orbs(at, reward);
+            }
             self.guest_killed_player_trigger(host, conn, at, blow);
+            self.guest_award_kill_score(host, conn, at);
             self.as_guest(host, conn, |game| {
                 game.award_custom_stat("deaths", 1);
                 game.stats.reset_death_timers();
             });
-            // The experience the catalyst took does not drop (`Player.
-            // skipDropExperience`).
-            if !consumed {
-                self.spawn_orbs(at, reward);
-            }
         }
     }
 
@@ -5019,399 +4944,6 @@ impl Game<'_> {
                 game.native_player_jump(uuid, &name);
             }
         });
-    }
-
-    /// The guest's body on the server each tick: ServerPlayer.tick's damage
-    /// clock and Entity.baseTick's fluid phase (burning), then for each move
-    /// ServerPlayer.doCheckFallDamage (the fall distance grows while they go
-    /// down and hurts them where they land, as the host's own landing does;
-    /// water resets it, lava halves it) and checkMovementStatistics (the
-    /// exhaustion of sprinting and swimming), then LivingEntity.baseTick's
-    /// hazards (drowning, lava, fire blocks, suffocation, the void), and
-    /// regeneration and the food tick (ServerPlayer.doTick). Their hurt
-    /// sounds are heard at the guest.
-    fn guest_server_tick(&mut self, host: &mut LanHost, conn: u32) {
-        self.guest_replay(host, conn);
-        self.guest_vehicle_tick(host, conn);
-        // The last move's fall stands in for the server's delta movement.
-        let fell = host
-            .hub
-            .guest_mut(conn)
-            .and_then(|g| g.moves.last().map(|m| m.0[1]))
-            .unwrap_or(0.0);
-        self.guest_glide_tick(host, conn, fell);
-        let Some(g) = host.hub.guest_mut(conn) else {
-            return;
-        };
-        let moves = std::mem::take(&mut g.moves);
-        let from_ground = if moves.is_empty() {
-            g.on_ground
-        } else {
-            g.moves_from_ground
-        };
-        if g.spectator() {
-            // ServerPlayer.doTick runs the player's whole tick for a spectator
-            // too, unless its box touches an unloaded chunk
-            // (`touchingUnloadedChunk`): its effects (LivingEntity.baseTick),
-            // Player.aiStep's tickRegeneration and foodData.tick go on while
-            // it watches (#11312). The hazards, the travel and the movement
-            // statistics below are what a spectator's body skips.
-            let (at, body) = (g.position, g.dimensions());
-            let loaded =
-                !touching_unloaded_chunk(at, body, |x, z| self.world.chunks.contains_key(&(x, z)));
-            if !g.effects.list.is_empty() {
-                self.as_guest(host, conn, |game| game.tick_mob_effects());
-            }
-            self.as_guest(host, conn, |game| {
-                game.handle_shoulder_entities();
-                if !loaded {
-                    return;
-                }
-                let rules = game.world.health_rules;
-                let Some(player) = game.player.as_mut() else {
-                    return;
-                };
-                // Entity.baseTick's clocks (hurtTime, invulnerableTime) run too.
-                player.health.advance_clock();
-                let _ = player.peaceful_regeneration(rules);
-                let _ = player.food_tick(&game.health_resources, rules);
-                let events = std::mem::take(&mut player.events);
-                game.record_combat(&events);
-            });
-            return;
-        }
-        let in_wall = !g.sleeping && self.in_wall(g.position, g.dimensions());
-        let at = g.position;
-        let (sneaking, sleeping) = (g.sneaking, g.sleeping);
-        let riding = g.vehicle.is_some();
-        if g.motion
-            .as_ref()
-            .is_some_and(|m| m.auto_spin_attack_ticks > 0)
-        {
-            self.as_guest(host, conn, |game| game.server_spin_attack());
-        }
-        let mut soul = None;
-        let events = self.as_guest(host, conn, |game| {
-            let rules = game.world.health_rules;
-            let freeze_immune = game.wears_freeze_immune();
-            let burn_immune = game.wears_burn_from_stepping_immunity();
-            let boat = game.riding_boat_fluid_box();
-            let Some(player) = game.player.as_mut() else {
-                return (Vec::new(), None);
-            };
-            player.fluids.boat = boat;
-            let mut w = MotionWorld {
-                entities: &[],
-                player,
-                scene: &mut game.world,
-                assets: &game.pack.assets,
-                collision_binding: &game.collision,
-                resources: &game.motion,
-                health: &game.health_resources,
-            };
-            w.player.health.advance_clock();
-            let _ = w.fluid_base_tick();
-            w.player.ground.on_ground = from_ground;
-            // Player.aiStep: a flying player that isn't riding starts every tick
-            // with no fall distance, so flying down in creative and switching to
-            // survival lands without the flight's distance.
-            if w.player.flying && !riding {
-                w.player.fall_distance = 0.0;
-            }
-            let travelled: Vec<[f64; 3]> = moves.iter().map(|m| m.0).collect();
-            // The tick's whole movement, for the delta movement a glide's wall
-            // hit reads (`handleMovePlayer` gives the server copy the client's
-            // own movement).
-            let tick_movement = travelled.iter().fold(Vec3::ZERO, |sum, d| {
-                sum.add_vector(Vec3::new(d[0], d[1], d[2]))
-            });
-            // Entity.move's movementThisTick: each move, from where the
-            // tick's first one started.
-            let end = w.player.position;
-            let start = travelled
-                .iter()
-                .fold(end, |p, d| p.subtract(Vec3::new(d[0], d[1], d[2])));
-            w.player.history.clear();
-            let mut from = start;
-            for d in &travelled {
-                let delta = Vec3::new(d[0], d[1], d[2]);
-                let to = from.add_vector(delta);
-                w.player
-                    .history
-                    .add(horizon_world::entity_move::MovementRecord {
-                        from,
-                        to,
-                        original: Some(delta),
-                    });
-                from = to;
-            }
-            // handleMovePlayer moves the player before it checks the fall: a
-            // cobweb or a sweet berry bush it moves through has already made it
-            // forget the fall (`makeStuckInBlock`), so landing in one is safe.
-            let _ = w.server_stuck_in_blocks(start);
-            for (moved, on_ground) in moves {
-                let movement = Vec3::new(moved[0], moved[1], moved[2]);
-                let landed = (|| -> horizon_client::Result<()> {
-                    w.set_on_ground_with_movement(on_ground, false, movement)?;
-                    let pos = w.legacy_on_position()?;
-                    let state = w.block_state(pos)?;
-                    w.check_fall_damage(moved[1], on_ground, state, pos)?;
-                    w.check_movement_statistics(movement)
-                })();
-                if landed.is_err() {
-                    break;
-                }
-            }
-            // A ServerPlayer travels on the server too
-            // (MoveSimulationType.AUTHORITATIVE_SIDE_AND_SERVER), so every tick
-            // on a ladder or vine LivingEntity.handleOnClimbable resets its fall
-            // distance: climbing down doesn't hurt where it lands (#1255).
-            if w.climbable().unwrap_or(false) {
-                w.player.fall_distance = 0.0;
-            }
-            // ServerGamePacketListenerImpl.handlePlayerPositionChange ends the
-            // impulse context on LivingEntity.hasLandedInLiquid: a move into a
-            // liquid that does not rise, or a wind charge that lands in water
-            // would waive the fall after it.
-            let liquid = w.player.fluids.was_touching_water || w.player.is_in_lava();
-            let delta_y = w.player.velocity.y;
-            w.player.impulse.landed_in_liquid(delta_y, liquid);
-            // Entity.applyEffectsFromBlocks along those moves: magma, cactus,
-            // lit campfires and grown sweet berry bushes hurt (#1305).
-            w.player.shift_key_down = sneaking;
-            let _ = w.player.set_sleeping(sleeping);
-            w.player.freeze_immune = freeze_immune;
-            w.player.burn_from_stepping_immune = burn_immune;
-            let _ = w.server_block_damage(start);
-            let _ = w.update_soul_speed_block();
-            let _ = w.tick_environment_damage();
-            let _ = w.apply_fire_contact();
-            let _ = w.server_hazards_tick(in_wall);
-            // LivingEntity.aiStep: a Riptide spin counts down on the server's
-            // copy too, or it would stay in the spin pose (eye 0.4) for good.
-            // LivingEntity.tick: a changed scale rebuilds the box. Player.tick
-            // ends with updatePlayerPose — or, for a passenger, the rideTick
-            // path that clears a swim (#4509 / #3308).
-            let _ = if riding {
-                w.passenger_pose_tick()
-            } else {
-                w.server_player_pose_tick()
-            };
-            let mut events = std::mem::take(&mut w.player.events);
-            // Powder snow and cauldrons put the fire out along those moves.
-            game.block_extinguish_player(&events);
-            // Entity.baseTick: rain puts out a burning player.
-            game.rain_extinguish_player();
-            // WitherRoseBlock.entityInside along those moves.
-            for event in &events {
-                if matches!(event, MotionEvent::InsideWitherRose) {
-                    game.wither_rose_contact();
-                }
-            }
-            // ServerGamePacketListenerImpl.handleMovePlayer:
-            // Player.checkMovementStatistics for each move.
-            for d in travelled {
-                game.movement_stats(Vec3::new(d[0], d[1], d[2]));
-            }
-            // LivingEntity.baseTick: a new block position runs the worn
-            // enchantments' location_changed effects (frost walker).
-            game.location_changed_effects([start.x, start.y, start.z], from_ground);
-            // LivingEntity.baseTick: outside the world border, then tickEffects.
-            game.border_damage();
-            game.tick_mob_effects();
-            // Soul Speed's effects (LivingEntity.baseTick's location_changed
-            // and tick effects); its particle goes to the players around.
-            soul = game.tick_soul_speed();
-            game.handle_shoulder_entities();
-            let Some(player) = game.player.as_mut() else {
-                return (Vec::new(), None);
-            };
-            let _ = player.peaceful_regeneration(rules);
-            let _ = player.food_tick(&game.health_resources, rules);
-            events.append(&mut player.events);
-            player.carry_client_movement(tick_movement);
-            let _ = MotionWorld {
-                entities: &[],
-                player,
-                scene: &mut game.world,
-                assets: &game.pack.assets,
-                collision_binding: &game.collision,
-                resources: &game.motion,
-                health: &game.health_resources,
-            }
-            .server_travel();
-            // Player.aiStep's entity contacts run with the player's body,
-            // even when the level and its mobs are frozen. Flush their damage
-            // events and marked velocity through the existing guest path.
-            game.touch_pufferfish();
-            let Some(player) = game.player.as_mut() else {
-                return (events, None);
-            };
-            // Landing damage from this travel reaches the tracker too.
-            events.append(&mut player.events);
-            // A hurt since the last tick marked the velocity (Entity.markHurt):
-            // ServerEntity.sendChanges sends it as it is after this travel.
-            let marked = std::mem::take(&mut player.health.sync_velocity);
-            let velocity = marked.then_some(player.velocity);
-            // Player.causeFallDamage: a fall of 2 blocks or more counts.
-            for event in &events {
-                if let MotionEvent::Fall(horizon_client::landing::FallEvent::Statistic(cm)) = event
-                {
-                    game.award_custom_stat("fall_one_cm", *cm);
-                }
-            }
-            game.record_combat(&events);
-            game.wear_armor(&events);
-            (events, velocity)
-        });
-        let Some((events, marked)) = events else {
-            return;
-        };
-        if let Some((at, velocity)) = soul {
-            super::lan_particles::send_soul_particle(host, at, velocity);
-        }
-        self.as_guest(host, conn, |game| {
-            game.sculk_step_on_player();
-            game.tick_player_sculk_events();
-            // Entity.restituteMovementAfterCollisions: GameEvent.BOUNCE.
-            for event in &events {
-                if matches!(event, MotionEvent::Bounce { .. }) {
-                    game.post_entity_event("minecraft:bounce", horizon_client::mobs::Who::Player);
-                }
-            }
-        });
-        for event in events {
-            match event {
-                MotionEvent::Health(horizon_client::health::HealthEvent::DamageBroadcast {
-                    source,
-                }) => self.guest_damage_broadcast(host, conn, source),
-                // LivingEntity.playHurtSound: the server's `Entity.playSound`
-                // reaches every player around but the hurt one, whose own
-                // client plays it from handleDamageEvent (#4149).
-                MotionEvent::HurtSound(sound) => self.guest_hurt_sound(host, conn, sound),
-                // LivingEntity.checkFallDamage: the crumbs reach every player.
-                MotionEvent::Fall(horizon_client::landing::FallEvent::Particles {
-                    state,
-                    position,
-                    count,
-                    speed,
-                }) => self.landing_dust(Some(host), state, position, count, speed),
-                // A block's own sound names no player: the guest hears it too.
-                MotionEvent::Fall(horizon_client::landing::FallEvent::Sound {
-                    sound,
-                    position: Some(pos),
-                    volume,
-                    pitch,
-                }) if sound.block_sound().is_some() => {
-                    if let Some(name) = sound.block_sound() {
-                        let source = horizon_client::settings::sound_source(name) as i32;
-                        let at = [
-                            f64::from(pos.x) + 0.5,
-                            f64::from(pos.y) + 0.5,
-                            f64::from(pos.z) + 0.5,
-                        ];
-                        self.audio.play_unshared(name, Some(at), volume, pitch);
-                        host.hub.sound(name, at, volume, pitch, source, None);
-                    }
-                }
-                // LivingEntity.causeFallDamage, and HoneyBlock.fallOn's
-                // `entity.playSound`: Player.playSound skips the guest, whose
-                // own client plays it; everyone else hears it.
-                MotionEvent::Fall(horizon_client::landing::FallEvent::Sound {
-                    sound,
-                    volume,
-                    pitch,
-                    ..
-                }) => {
-                    if let Some(name) = sound
-                        .player_fall_sound()
-                        .or_else(|| sound.honey_landing_sound())
-                    {
-                        let source = horizon_client::settings::sound_source(name) as i32;
-                        self.audio.play_unshared(name, Some(at), volume, pitch);
-                        host.hub.sound(name, at, volume, pitch, source, Some(conn));
-                    }
-                }
-                // HoneyBlock.fallOn: entity event 54, including the player who
-                // landed (`broadcastEntityEvent` has no excluded player).
-                MotionEvent::Fall(horizon_client::landing::FallEvent::Broadcast(event))
-                    if horizon_client::landing::honey_particle_count(event as i8).is_some() =>
-                {
-                    if let Some(id) = host.hub.guest(conn).map(|g| g.entity_id) {
-                        host.hub.entity_event(id, event as i8, at);
-                    }
-                }
-                MotionEvent::Fall(event) => {
-                    let player = host.hub.guest(conn).map(|g| g.uuid);
-                    // The rule's own game event goes out as the player whose
-                    // landing it was (`FarmlandBlock.turnToBaseBlock`'s change,
-                    // `TurtleEggBlock.decreaseEggs`' destroy): a sculk sensor, a
-                    // calibrated sensor and a warden hear it.
-                    if let Some(vibration) = self.landing_block_updates(player, &event) {
-                        self.as_guest(host, conn, |game| game.post_landing_vibration(vibration));
-                    }
-                }
-                // PowderSnowBlock.entityInside: every player around sees the
-                // snowflake (`ServerLevel.sendParticles`).
-                MotionEvent::Snowflake { position, velocity } => {
-                    super::lan_particles::send_snowflake_particle(
-                        host,
-                        [position.x, position.y, position.z],
-                        [velocity.x, velocity.y, velocity.z],
-                    );
-                }
-                // LivingEntity.baseTick's entity event 67, to every client
-                // around, the guest's own included; this window draws it too.
-                MotionEvent::Drown => {
-                    if let Some(g) = host.hub.guest(conn) {
-                        host.hub
-                            .entity_event(g.entity_id, super::combat::DROWN_EVENT, at);
-                    }
-                    self.drown_particles(at, [0.0; 3]);
-                }
-                // ServerPlayer.onInsideBlock: the enter_block trigger, for the
-                // player who moved.
-                MotionEvent::EnterBlock { state } => {
-                    self.as_guest(host, conn, |game| game.trigger_enter_block(state));
-                }
-                // HoneyBlock.maybeDoSlideEffects: the sound reaches the
-                // others (Player.playSound excludes the player, whose client
-                // plays it), the entity event 53 everyone around.
-                MotionEvent::HoneySlide {
-                    pos,
-                    sound,
-                    particles,
-                } => {
-                    if self.world.game_time % 20 == 0 {
-                        self.as_guest(host, conn, |game| {
-                            game.trigger_honey_slide([pos.x, pos.y, pos.z])
-                        });
-                    }
-                    let Some((id, at)) = host.hub.guest(conn).map(|g| (g.entity_id, g.position))
-                    else {
-                        continue;
-                    };
-                    if sound {
-                        let name = "minecraft:block.honey_block.slide";
-                        let source = horizon_client::settings::sound_source(name) as i32;
-                        self.audio.play_unshared(name, Some(at), 1.0, 1.0);
-                        host.hub.sound(name, at, 1.0, 1.0, source, Some(conn));
-                    }
-                    if particles {
-                        self.honey_slide_particles(at);
-                        host.hub.entity_event(id, 53, at);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let (Some(v), Some(g)) = (marked, host.hub.guest(conn)) {
-            self.native_player_velocity(g.uuid, &g.name, [v.x, v.y, v.z]);
-            g.send(&C::SetEntityMotion(play::SetEntityMotion {
-                id: g.entity_id,
-                velocity: [v.x, v.y, v.z],
-            }));
-        }
     }
 
     /// ServerGamePacketListenerImpl.handlePlayerCommand START_FALL_FLYING:
@@ -6399,262 +5931,8 @@ fn first_spin_target(
 mod spin_target_tests;
 
 #[cfg(test)]
-#[path = "lan_actions/vehicle_loot_tests.rs"]
-pub(super) mod vehicle_loot_tests;
-
-#[cfg(test)]
-mod respawn_world_point_tests {
-    use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
-    use horizon_client::lan::{Joined, NetConfig, Out, PlayerSender, guest::Guest, hub::HubConfig};
-    use horizon_core::geometry::Vec3;
-    use horizon_protocol::packets::{configuration::ClientInformation, play::Clientbound};
-    use std::sync::{Arc, atomic::AtomicI32, mpsc};
-
-    /// PlayerList.respawn sends world respawn data, independently of the personal landing.
-    #[test]
-    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
-    fn guest_respawn_keeps_world_information_distinct_from_personal_landing() {
-        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
-        let settings = Settings::default();
-        let loaded = load_resources(
-            root.clone(),
-            None,
-            &root,
-            &settings,
-            std::time::Instant::now(),
-            false,
-            true,
-            &Progress::new(),
-            &mut |_, _| unreachable!(),
-        )
-        .unwrap();
-        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
-        options.resources = root.clone();
-        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
-        let mut game = Game::new(
-            &loaded.resources,
-            loaded.pack,
-            loaded.gui.unwrap(),
-            options,
-            settings,
-            Audio::silent(&root),
-            None,
-        )
-        .unwrap();
-        let scratch = std::env::temp_dir().join(format!(
-            "horizon-respawn-point-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&scratch).unwrap();
-        game.world_root = scratch.clone();
-        let world = [0, 100, 0];
-        let personal = [5.5, 101.0, 5.5];
-        game.level.world_spawn = Some(world);
-        game.spawn = Some(Vec3::new(0.5, 100.0, 0.5));
-        game.lan_host(
-            super::super::lan::LanSettings {
-                port: 0,
-                guest_commands: true,
-                force_game_mode: false,
-            },
-            NetConfig {
-                announce: false,
-                ..NetConfig::loopback(0, "respawn-test".into(), 2)
-            },
-            HubConfig {
-                default_game_mode: 0,
-                guest_commands: true,
-                force_game_mode: false,
-                hardcore: false,
-                view_distance: 2,
-                simulation_distance: 2,
-                dimension: "minecraft:overworld".into(),
-                allow_flight: false,
-                seed: 0,
-                max_players: 2,
-                integrated: false,
-                levels: Default::default(),
-            },
-        )
-        .unwrap();
-        let (tx, rx) = mpsc::channel();
-        let mut guest = Guest::new(
-            Joined {
-                conn: 2,
-                uuid: 330,
-                name: "RespawnGuest".into(),
-                properties: Vec::new(),
-                info: ClientInformation::new(2),
-                brand: "test".into(),
-                sender: PlayerSender::new(tx, Arc::default()),
-                latency: Arc::new(AtomicI32::new(0)),
-                address: "127.0.0.1:25565".parse().unwrap(),
-                expected: false,
-                configured: Default::default(),
-            },
-            2,
-            [0.5, 100.0, 0.5],
-            2,
-        );
-        guest.dimension = "minecraft:overworld".into();
-        guest.placed = true;
-        guest.loaded = true;
-        guest.spawn = Some(personal);
-        guest.health = 0.0;
-        guest.dead = true;
-        let mut host = game.lan.take().unwrap();
-        host.hub.guests.push(guest);
-        game.guest_respawn(&mut host, 2);
-        let guest = &host.hub.guests[0];
-        assert_eq!(guest.uuid, 330);
-        assert_eq!(guest.position, personal);
-        assert_eq!(guest.health, 20.0);
-        assert!(!guest.dead);
-        let mut packets = Vec::new();
-        for out in rx.try_iter() {
-            match out {
-                Out::Packet(body) => packets.push(body),
-                Out::Packets(bodies) => packets.extend(bodies),
-                Out::Disconnect(_) => panic!("unexpected disconnect"),
-            }
-        }
-        let mut sequence = Vec::new();
-        let mut points = Vec::new();
-        for body in packets {
-            let mut r = horizon_protocol::buf::Reader::new(&body);
-            let id = r.varint().unwrap();
-            match Clientbound::decode(id, r.rest()).unwrap() {
-                Clientbound::Respawn(_) => sequence.push(84),
-                Clientbound::SetDefaultSpawnPosition(p) => {
-                    sequence.push(99);
-                    points.push((
-                        p.pos.dimension,
-                        p.pos.pos,
-                        p.yaw.to_bits(),
-                        p.pitch.to_bits(),
-                    ));
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(sequence, [84, 99, 99]);
-        assert_eq!(points, vec![("minecraft:overworld".into(), world, 0, 0); 2]);
-        drop(host);
-        drop(game);
-        std::fs::remove_dir_all(scratch).unwrap();
-    }
-
-    /// A mod's health 0 for a guest dies as `/kill` does: the death message
-    /// and the death screen, not only a zero in the record.
-    #[test]
-    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
-    fn a_mods_zero_health_kills_a_guest_as_kill_does() {
-        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
-        let settings = Settings::default();
-        let loaded = load_resources(
-            root.clone(),
-            None,
-            &root,
-            &settings,
-            std::time::Instant::now(),
-            false,
-            true,
-            &Progress::new(),
-            &mut |_, _| unreachable!(),
-        )
-        .unwrap();
-        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
-        options.resources = root.clone();
-        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
-        let mut game = Game::new(
-            &loaded.resources,
-            loaded.pack,
-            loaded.gui.unwrap(),
-            options,
-            settings,
-            Audio::silent(&root),
-            None,
-        )
-        .unwrap();
-        let scratch = std::env::temp_dir().join(format!(
-            "horizon-status-death-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&scratch).unwrap();
-        game.world_root = scratch.clone();
-        game.level.world_spawn = Some([0, 100, 0]);
-        game.spawn = Some(Vec3::new(0.5, 100.0, 0.5));
-        game.lan_host(
-            super::super::lan::LanSettings {
-                port: 0,
-                guest_commands: true,
-                force_game_mode: false,
-            },
-            NetConfig {
-                announce: false,
-                ..NetConfig::loopback(0, "status-death-test".into(), 2)
-            },
-            HubConfig {
-                default_game_mode: 0,
-                guest_commands: true,
-                force_game_mode: false,
-                hardcore: false,
-                view_distance: 2,
-                simulation_distance: 2,
-                dimension: "minecraft:overworld".into(),
-                allow_flight: false,
-                seed: 0,
-                max_players: 2,
-                integrated: false,
-                levels: Default::default(),
-            },
-        )
-        .unwrap();
-        let (tx, _rx) = mpsc::channel();
-        let mut guest = Guest::new(
-            Joined {
-                conn: 2,
-                uuid: 331,
-                name: "StatusGuest".into(),
-                properties: Vec::new(),
-                info: ClientInformation::new(2),
-                brand: "test".into(),
-                sender: PlayerSender::new(tx, Arc::default()),
-                latency: Arc::new(AtomicI32::new(0)),
-                address: "127.0.0.1:25565".parse().unwrap(),
-                expected: false,
-                configured: Default::default(),
-            },
-            2,
-            [0.5, 100.0, 0.5],
-            2,
-        );
-        guest.dimension = "minecraft:overworld".into();
-        guest.placed = true;
-        guest.loaded = true;
-        let mut host = game.lan.take().unwrap();
-        host.hub.guests.push(guest);
-        // Inside the player's own turn, as a tick hook sets it.
-        let set = game.as_guest(&mut host, 2, |g| {
-            g.native_set_player_status(331, Some(0.0), None, None)
-        });
-        assert_eq!(set, Some(true));
-        assert_eq!(host.hub.guests[0].health, 0.0);
-        game.guest_die(&mut host, 0, 2);
-        assert!(host.hub.guests[0].dead, "health 0 must kill");
-        drop(host);
-        drop(game);
-        std::fs::remove_dir_all(scratch).unwrap();
-    }
-}
+#[path = "respawn_world_point_tests.rs"]
+mod respawn_world_point_tests;
 
 #[cfg(test)]
 mod swing_echo_tests {
@@ -7158,7 +6436,7 @@ mod connected_self_pose_tests {
             tick_rate: 20.0,
             tick_frozen: true,
             tick_steps: Default::default(),
-            collision: Some(&game.collision),
+            collision: Some(game.collision),
             border: &game.border,
             streaming: None,
         };
@@ -7238,7 +6516,7 @@ mod connected_self_pose_tests {
         game.block_ticks
             .add_empty_chunk(ChunkPos::new(0, 0))
             .unwrap();
-        game.player = Some(PlayerMotion::new(&game.motion, Vec3::new(2.5, 200.0, 2.5)).unwrap());
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::new(2.5, 200.0, 2.5)).unwrap());
         assert!(game.run_command("forceload add 0 0"));
         assert!(game.run_command("fill 0 199 0 15 199 15 stone"));
         game.lan_host(
@@ -7294,7 +6572,7 @@ mod connected_self_pose_tests {
         guest.load_timeout = 0;
         guest.on_ground = true;
         guest.game_mode = 0;
-        guest.motion = Some(Box::new(PlayerMotion::new(&game.motion, position).unwrap()));
+        guest.motion = Some(Box::new(PlayerMotion::new(game.motion, position).unwrap()));
         assert_eq!(guest.health, 20.0);
         assert!(guest.client_loaded());
         let own = guest.entity_id;
