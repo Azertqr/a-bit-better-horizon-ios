@@ -1,19 +1,7 @@
+// File: crates/horizon-client/src/entry.rs
 //! Startup shared by the gameplay library and its executable.
 use crate::{crash, game, logging};
 
-/// Start the game where a phone lets it write.
-///
-/// iOS hands an app a working directory of `/`, which is read-only, while the game builds its world saves,
-/// its `options.txt`, its `.horizon-cache` and its `resourcepacks/` from `current_dir()` -- so every one of
-/// those is a path it cannot create. The writable place is the app's data container, and `$HOME` names it,
-/// so the fix is one call made before anything reads a path: work in `Documents`. The launcher runs the game
-/// inside its game home instead; a phone has no launcher, and `Documents` is the folder the Files app shows,
-/// which is where a player drops a resource pack or a world.
-///
-/// Prepared resources are looked for by `Options::read`, which checks a `resources/` beside the
-/// executable first and then the `resources/` that `horizon_client::import` unpacks into this very
-/// folder -- so both the assets shipped in the bundle and the ones carried in by a player are found
-/// with no argument to pass.
 #[cfg(target_os = "ios")]
 fn into_app_sandbox() -> Result<std::path::PathBuf, String> {
     let documents = std::env::var_os("HOME")
@@ -26,7 +14,6 @@ fn into_app_sandbox() -> Result<std::path::PathBuf, String> {
     Ok(documents)
 }
 
-/// winit's own messages about the phone, filed in the game's log under a target that names them.
 #[cfg(target_os = "ios")]
 fn native_ios_log(message: &str) {
     log::info!("Horizon: ios: {message}");
@@ -39,12 +26,26 @@ pub fn main() {
 
 /// Start the game with trait mods in dispatch order.
 pub fn main_with(mods: crate::mod_api::Mods) {
-    // First: a trait injection into anything below (logging, the crash handler) calls its mod.
     if crate::mod_api::MODS.set(mods).is_err() {
         log::warn!("Trait mods already installed; ignoring the second list");
     }
     horizon_threads::configure_allocator();
-    // Before the event loop: iOS asks for the AirPlay scene's delegate by name when a display connects.
+    // Initialize Raven bS+ global state on boot with Combat/Movement/Render defaults ready
+    if let Ok(mut raven) = crate::raven_bs::global_raven().lock() {
+        raven.cfg.reach_enabled = true;
+        raven.cfg.reach_max = 4.2;
+        raven.cfg.velocity_enabled = true;
+        raven.cfg.velocity_horizontal = 0.0;
+        raven.cfg.velocity_vertical = 100.0;
+        raven.cfg.sprint_enabled = true;
+        raven.cfg.keep_sprint_enabled = true;
+        raven.cfg.nofall_enabled = true;
+        raven.cfg.fast_place_enabled = true;
+        raven.cfg.hud_enabled = true;
+        raven.cfg.keystrokes_enabled = true;
+        raven.cfg.player_esp_enabled = true;
+        raven.cfg.fullbright_enabled = true;
+    }
     horizon_airplay::register();
     horizon_airplay::audio::start();
     #[cfg(target_os = "ios")]
@@ -55,28 +56,20 @@ pub fn main_with(mods: crate::mod_api::Mods) {
             std::process::exit(1);
         }
     };
-    // `android_main` already moved into the app's files folder.
     #[cfg(target_os = "android")]
     let documents = std::env::current_dir().unwrap_or_default();
 
-    // The platform's features the dedicated server loads from server.toml, through the engine's hooks.
     horizon_chat_filter::install();
     crate::horizon_look::give();
-    // OptiFine's and Polytone's pack formats (platform, docs/layers.md), before any pack loads.
     horizon_client::pack_formats::install();
-    // horizon-extras (docs/forking.md): without the feature, no Horizon Settings or Mods page.
     if !cfg!(feature = "horizon-extras") {
         horizon_client::options_ui::HORIZON_EXTRAS
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
     horizon_client::telemetry::mark_start();
-    // Opt-in telemetry keeps each crash report (docs/telemetry.md), whatever the mode.
     crash::on_report(horizon_client::telemetry::keep_crash);
-    // Crates above the engine registered their hooks before this (horizon-official's `main`),
-    // then the Horizon parts still in this crate; none registers after this point.
     game::player_hooks::register();
     horizon_hooks::engine::seal();
-    // The text crates ship (`horizon_hooks::lang`), loaded with the game's own languages.
     horizon_client::lang::install_crate_files(horizon_hooks::lang::engine::all());
     horizon_client::spans::startup::init(std::time::Instant::now());
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -84,11 +77,9 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     let help = game_args
         .clone()
         .any(|a| a == "--help" || a == "-h" || a == "--launch-api");
-    // --home before the log opens in it.
     if let Some(dir) = game_args.clone().skip_while(|a| *a != "--home").nth(1) {
         logging::set_game_home(std::path::absolute(dir).unwrap_or_else(|_| dir.into()));
     }
-    // The dedicated server logs in its own folder (--game-dir's), as vanilla's does; the game in its home.
     let (home, side, thread) = if args.iter().any(|a| a == "--dedicated") {
         let folder = game_args
             .clone()
@@ -98,8 +89,6 @@ pub fn main_with(mods: crate::mod_api::Mods) {
             .unwrap_or_else(|| ".".into());
         (folder, "server", "Server thread")
     } else {
-        // --player-dir too (a game's, not a server's): a player of a shared game folder keeps
-        // its log and crash reports in its own; crash telemetry stays with the home's consent.
         if let Some(dir) = game_args
             .clone()
             .skip_while(|a| *a != "--player-dir")
@@ -109,31 +98,21 @@ pub fn main_with(mods: crate::mod_api::Mods) {
         }
         (logging::game_home(), "client", "Render thread")
     };
-    // Before the log opens, so a mod's injection hears its first lines.
     logging::set_line_hook(crate::native_client_hooks::native_log_line);
     if !help {
         logging::init(
             logging::player_dir_override().unwrap_or(home.as_path()),
             thread,
         );
-        // The log's first line names the build, so a bug report that carries the log says which one it was.
-        log::info!("Horizon {}", crash::version());
+        log::info!("Horizon {} [Raven bS+ Rust Loaded]", crash::version());
         crash::install(home.clone(), side);
-        // winit has no logger of its own on a phone: its lines stay in the device console, which is
-        // not in the log a player shares. Its side of a missed touch, a dead gesture or a memory
-        // warning belongs beside the game's, in latest.log.
         #[cfg(target_os = "ios")]
         winit::platform::ios::set_log_hook(Some(native_ios_log));
-        // The Microsoft account a last start kept (the title screen's face button), signed in again.
         #[cfg(not(target_os = "ios"))]
         if side == "client" {
             horizon_client::msa::restore(&home);
         }
     }
-    // What a phone does with its files before the game looks for them, once the log can say so:
-    // on a worker, because a launch that unpacks a prepared archive before its first frame is what
-    // iOS's watchdog kills. The launcher holds Play back until these files exist, so this is the
-    // only door an archive dropped into `Documents` has.
     #[cfg(any(target_os = "ios", target_os = "android"))]
     if !help {
         horizon_client::import::boot(&documents);
@@ -364,16 +343,12 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     }
     raise_open_file_limit();
     if let Err(error) = game::run_with() {
-        // A bad command line is the caller's mistake, not a crash: no report.
         let usage = error.is::<game::UsageError>();
         log::error!("Horizon: {error}");
         logging::flush();
-        // The report's path is the last line on stderr (crash::SAVED_LINE).
         if !help && !usage {
             crash::report_error(&home, side, &*error);
         }
-        // Started from Explorer, the console window closes with the game:
-        // keep the message on screen until it is read.
         #[cfg(windows)]
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
             eprintln!("Press Enter to close.");
@@ -389,11 +364,6 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     logging::flush();
 }
 
-/// The JVM raises its open-file limit to the hard limit as it starts
-/// (`-XX:+MaxFDLimit`, on by default), so a vanilla server may hold as many
-/// sockets and region files as the host allows, not the soft default (often
-/// 1024 in a container). The same here; macOS caps it at `OPEN_MAX`, as the
-/// JVM does there.
 fn raise_open_file_limit() {
     #[cfg(unix)]
     {
