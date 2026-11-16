@@ -5645,29 +5645,13 @@ impl Game<'_> {
         if self.agent.hold_server {
             return Ok(());
         }
-        // `Player.entityInteractionRange`/`blockInteractionRange` for the tick's
-        // picks: the attribute carries creative's and a server's modifiers.
         self.entity_reach = self.interaction_range("minecraft:entity_interaction_range", 3.0, 5.0);
         self.block_reach = self.interaction_range("minecraft:block_interaction_range", 4.5, 5.0);
-        if let Ok(raven) = crate::raven_bs::global_raven().lock() {
-            if raven.cfg.reach_enabled {
-                self.entity_reach = self.entity_reach.max(raven.cfg.reach_max);
-                self.block_reach = self.block_reach.max(raven.cfg.reach_max + 1.0);
-            }
-            if raven.cfg.fast_place_enabled {
-                self.use_delay = self.use_delay.min(u32::from(raven.cfg.fast_place_delay));
-            }
-            if raven.cfg.delay_remover_enabled {
-                self.destroy_delay = 0;
-            }
-            if let Some(p) = self.player.as_mut() {
-                if raven.cfg.nofall_enabled {
-                    p.fall_distance = 0.0;
-                }
-                if raven.cfg.fly_enabled {
-                    p.flying = true;
-                }
-            }
+        self.raven_tick();
+        if self.remote.is_some() {
+            let res = self.tick_remote();
+            self.raven_tick();
+            return res;
         }
         self.tick_debug_keys()?;
         self.tick_debug_charts();
@@ -5682,9 +5666,6 @@ impl Game<'_> {
                 }
                 self.screen = Screen::Inventory;
             }
-        }
-        if self.remote.is_some() {
-            return self.tick_remote();
         }
         // Only a server ticks its own world from here: its players are guests, swapped in for
         // their turns (`as_guest`), and the window's player is a client of it.
@@ -6364,7 +6345,7 @@ impl Game<'_> {
         }
         if show_hud {
             self.draw_touch_controls(&mut batch);
-            crate::raven_bs::draw_hud_and_clickgui(&mut batch, &self.gui.atlas);
+            self.raven_hud(&mut batch);
         }
         // The chat screen draws the focused chat itself; F1 hides the rest.
         if self.screen == Screen::Chat {
@@ -13086,3 +13067,4 @@ mod falling_air_tick_tests;
 
 #[cfg(test)]
 mod player_save_projection_tests;
+crate::impl_raven_game!();
