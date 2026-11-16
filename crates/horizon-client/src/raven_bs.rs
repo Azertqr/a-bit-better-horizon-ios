@@ -1769,7 +1769,7 @@ fn draw_module_settings_rows(
 }
 
 // ============================================================================
-// REAL GAMEPLAY HOOKS MACRO FOR `crates/horizon-client/src/game.rs` (V3 - DIRECT EXECUTION)
+// REAL GAMEPLAY HOOKS MACRO FOR `crates/horizon-client/src/game.rs` (V4 - FULL REMOTE + LOCAL PACKET SYNC)
 // ============================================================================
 
 #[macro_export]
@@ -1812,6 +1812,7 @@ macro_rules! impl_raven_game {
                         });
                     }
                 }
+                // Extended 2-block search for diagonal/sprint bridging
                 for d1 in dirs {
                     let mid = [target[0] + d1[0], target[1] + d1[1], target[2] + d1[2]];
                     if !self
@@ -1842,6 +1843,86 @@ macro_rules! impl_raven_game {
                     }
                 }
                 None
+            }
+
+            /// Directly places a block at `target_cell` both in the local client world AND sends `S::UseItemOn` + `S::Swing` to the server!
+            fn raven_place_block_at(&mut self, target_cell: [i32; 3], hit: Hit) -> bool {
+                let Some(stack) = self.inventory.get(self.selected).and_then(|s| s.clone()) else {
+                    return false;
+                };
+                if stack.count == 0 {
+                    return false;
+                }
+                let block_state = self
+                    .pack
+                    .assets
+                    .registry
+                    .default_state(&stack.item)
+                    .or_else(|| {
+                        self.items()
+                            .get(&stack.item)
+                            .and_then(|info| info.block.as_deref())
+                            .and_then(|bname| self.pack.assets.registry.default_state(bname))
+                    });
+                let Some(state) = block_state else {
+                    return false;
+                };
+                if self.res.facts().is_air(state) {
+                    return false;
+                }
+
+                // 1. Update client world immediately so player stands on the block right this frame
+                let _ = self.world.set(target_cell[0], target_cell[1], target_cell[2], state);
+                let _ = self.level_set(target_cell, state);
+
+                // 2. If connected to integrated/remote server, send real UseItemOn + Swing packets
+                if self.remote.is_some() {
+                    let face_id: i32 = match hit.face {
+                        [0, -1, 0] => 0,
+                        [0, 1, 0] => 1,
+                        [0, 0, -1] => 2,
+                        [0, 0, 1] => 3,
+                        [-1, 0, 0] => 4,
+                        [1, 0, 0] => 5,
+                        _ => 1,
+                    };
+                    let cursor = [
+                        (hit.point[0] - f64::from(hit.pos[0])).clamp(0.0, 1.0) as f32,
+                        (hit.point[1] - f64::from(hit.pos[1])).clamp(0.0, 1.0) as f32,
+                        (hit.point[2] - f64::from(hit.pos[2])).clamp(0.0, 1.0) as f32,
+                    ];
+                    let seq = if let Some(r) = self.remote.as_mut() {
+                        r.sequence += 1;
+                        r.sequence
+                    } else {
+                        1
+                    };
+                    self.send(horizon_protocol::packets::play::Serverbound::UseItemOn(
+                        horizon_protocol::packets::play::UseItemOn {
+                            hand: 0,
+                            pos: hit.pos,
+                            face: face_id,
+                            cursor,
+                            inside: hit.inside,
+                            world_border: false,
+                            sequence: seq,
+                        },
+                    ));
+                    self.send(horizon_protocol::packets::play::Serverbound::Swing(
+                        horizon_protocol::packets::play::Swing { hand: 0 },
+                    ));
+                }
+
+                self.swing_arm();
+                if !self.creative {
+                    if let Some(Some(st)) = self.inventory.get_mut(self.selected) {
+                        st.count = st.count.saturating_sub(1);
+                        if st.count == 0 {
+                            self.inventory[self.selected] = None;
+                        }
+                    }
+                }
+                true
             }
 
             /// Directly executes all active Raven bS+ modules on `Game` & `Remote` without getting overwritten
@@ -1914,7 +1995,7 @@ macro_rules! impl_raven_game {
                         return;
                     };
 
-                // Extract config snapshot so we can call `&mut self` methods freely without lock conflicts
+                // Extract config snapshot
                 let (
                     timer_en,
                     timer_val,
@@ -2170,30 +2251,26 @@ macro_rules! impl_raven_game {
                     self.clicks.miss_time = 0;
                 }
 
-                // 5. FastPlace (calls `remote_use()` directly so it places blocks at 20 CPS!)
+                // 5. FastPlace (places on looked-at block with 0 delay when holding touch or right click)
                 if fast_place_en {
                     self.use_delay = self.use_delay.min(u32::from(fast_place_del));
-                    let holding_block = self
-                        .inventory
-                        .get(self.selected)
-                        .and_then(|s| s.as_ref())
-                        .and_then(|st| self.items().get(&st.item))
-                        .is_some_and(|info| info.block.is_some());
-                    if holding_block
-                        && (self.right || self.touch.holding.is_some())
+                    if (self.right || self.touch.holding.is_some())
                         && self.ticks % u64::from(fast_place_del).saturating_add(1) == 0
                     {
                         self.stop_remote_mining();
                         self.use_delay = 0;
-                        if self.remote.is_some() {
-                            self.remote_use();
-                        } else {
-                            let _ = self.use_with_hand();
+                        if let Some(hit) = self.pick() {
+                            let target_cell = [
+                                hit.pos[0] + hit.face[0],
+                                hit.pos[1] + hit.face[1],
+                                hit.pos[2] + hit.face[2],
+                            ];
+                            let _ = self.raven_place_block_at(target_cell, hit);
                         }
                     }
                 }
 
-                // 6. Movement Physics (Direct `position` + `velocity` override so `controlled_simulation_tick` cannot wipe Speed/Fly/Step!)
+                // 6. Movement Physics (Fly, Speed, BHop, Boost, LongJump, Step, Dolphin, Velocity, JumpReset)
                 if let Some(p) = self.player.as_mut() {
                     if sprint_en && is_moving {
                         p.sprinting = true;
@@ -2237,6 +2314,7 @@ macro_rules! impl_raven_game {
                     }
 
                     if fly_en || freecam_en {
+                        p.flying = true;
                         let spd = if freecam_en {
                             freecam_spd * 0.48
                         } else {
@@ -2257,23 +2335,25 @@ macro_rules! impl_raven_game {
                                 } else if sneak_held {
                                     -spd * 0.75
                                 } else {
-                                    0.04
+                                    0.0
                                 }
                             }
                             $crate::raven_bs::FlyMode::Glide => {
                                 if jump_held {
                                     spd * 0.65
                                 } else {
-                                    -0.01
+                                    -0.02
                                 }
                             }
                             $crate::raven_bs::FlyMode::AirWalk => {
                                 p.ground.on_ground = true;
-                                0.04
+                                0.0
                             }
                         };
                     } else {
-                        // Speed / BHop / Boost: apply direct horizontal displacement + velocity
+                        if !self.creative {
+                            p.flying = false;
+                        }
                         if speed_en || bhop_en || boost_en {
                             let mult = if boost_en {
                                 speed_mult.max(1.65)
@@ -2281,11 +2361,9 @@ macro_rules! impl_raven_game {
                                 speed_mult
                             };
                             if is_moving {
-                                let extra_step = 0.22 * (mult - 1.0).max(0.1);
-                                p.position.x += dir_x * extra_step;
-                                p.position.z += dir_z * extra_step;
-                                p.velocity.x = dir_x * 0.29 * mult;
-                                p.velocity.z = dir_z * 0.29 * mult;
+                                p.sprinting = true;
+                                p.velocity.x = dir_x * 0.31 * mult;
+                                p.velocity.z = dir_z * 0.31 * mult;
                                 if on_ground
                                     && (bhop_en
                                         || matches!(
@@ -2302,7 +2380,7 @@ macro_rules! impl_raven_game {
                         if long_jump_en && is_moving {
                             if on_ground {
                                 p.velocity.y = 0.44;
-                                let lj_spd = 0.36 * long_jump_boost;
+                                let lj_spd = 0.38 * long_jump_boost;
                                 p.velocity.x = dir_x * lj_spd;
                                 p.velocity.z = dir_z * lj_spd;
                             } else {
@@ -2347,7 +2425,7 @@ macro_rules! impl_raven_game {
                     }
                 }
 
-                // 8. Combat: KillAura, AimAssist, AutoClicker, TPAura (Sends real `S::Attack` packet!)
+                // 8. Combat: KillAura, AimAssist, AutoClicker, TPAura (Sends BOTH `S::Attack` AND `S::Swing`!)
                 let eye = self
                     .eye_position()
                     .unwrap_or([p_pos[0], p_pos[1] + 1.62, p_pos[2]]);
@@ -2407,7 +2485,7 @@ macro_rules! impl_raven_game {
                         }
                     }
 
-                    // KillAura: rotate + send `S::Attack` directly to server!
+                    // KillAura: rotate + send `S::Attack` + `S::Swing` directly to server!
                     if ka_en && dist <= ka_range {
                         let desired = $crate::raven_bs::calc_angles(eye, tpos);
                         self.yaw = desired.0;
@@ -2452,6 +2530,9 @@ macro_rules! impl_raven_game {
                                         secondary: sneaking,
                                     },
                                 ));
+                                self.send(horizon_protocol::packets::play::Serverbound::Swing(
+                                    horizon_protocol::packets::play::Swing { hand: 0 },
+                                ));
                                 if autoblock_en {
                                     self.remote_use();
                                 }
@@ -2464,7 +2545,7 @@ macro_rules! impl_raven_game {
                     raven.target_info = None;
                 }
 
-                // AutoClicker
+                // AutoClicker (with `S::Swing` + `S::Attack`)
                 if ac_en && (self.left || self.touch.holding.is_some()) {
                     let should_click = if let Ok(mut raven) = $crate::raven_bs::global_raven().lock() {
                         let r = raven.rand_f32();
@@ -2499,22 +2580,30 @@ macro_rules! impl_raven_game {
                                         secondary: sneaking,
                                     },
                                 ));
+                                self.send(horizon_protocol::packets::play::Serverbound::Swing(
+                                    horizon_protocol::packets::play::Swing { hand: 0 },
+                                ));
                             } else {
                                 self.attack_clicks = self.attack_clicks.saturating_add(1);
                             }
+                        } else if self.remote.is_some() {
+                            self.send(horizon_protocol::packets::play::Serverbound::Swing(
+                                horizon_protocol::packets::play::Swing { hand: 0 },
+                            ));
                         }
                     }
                 }
 
-                // 9. Scaffold: directly calls `remote_use_item_on(Hand::Main)` with `forced_hit`!
+                // 9. Scaffold: places blocks directly under feet & ahead with `raven_place_block_at`
                 if scaffold_en {
                     if let Some(slot) = self.inventory.iter().take(9).position(|s| {
                         s.as_ref().is_some_and(|st| {
                             st.count > 0
-                                && self
-                                    .items()
-                                    .get(&st.item)
-                                    .is_some_and(|info| info.block.is_some())
+                                && (self.pack.assets.registry.default_state(&st.item).is_some()
+                                    || self
+                                        .items()
+                                        .get(&st.item)
+                                        .is_some_and(|info| info.block.is_some()))
                         })
                     }) {
                         self.selected = slot;
@@ -2554,38 +2643,36 @@ macro_rules! impl_raven_game {
                     };
 
                     if can_place {
-                        let under = [
-                            p_pos[0].floor() as i32,
-                            (p_pos[1] - 1.0).floor() as i32,
-                            p_pos[2].floor() as i32,
+                        let y_under = (p_pos[1] - 0.95).floor() as i32;
+                        let candidate_cells = [
+                            [p_pos[0].floor() as i32, y_under, p_pos[2].floor() as i32],
+                            [
+                                (p_pos[0] + dir_x * 0.45).floor() as i32,
+                                y_under,
+                                (p_pos[2] + dir_z * 0.45).floor() as i32,
+                            ],
+                            [
+                                (p_pos[0] + dir_x * 0.85).floor() as i32,
+                                y_under,
+                                (p_pos[2] + dir_z * 0.85).floor() as i32,
+                            ],
                         ];
-                        let ahead = [
-                            (p_pos[0] + dir_x * 0.45).floor() as i32,
-                            (p_pos[1] - 1.0).floor() as i32,
-                            (p_pos[2] + dir_z * 0.45).floor() as i32,
-                        ];
-                        let place_hit = self
-                            .raven_find_place_hit(under)
-                            .or_else(|| self.raven_find_place_hit(ahead));
 
-                        if let Some(hit) = place_hit {
-                            self.forced_hit = Some(hit);
-                            self.use_delay = 0;
-                            if self.remote.is_some() {
-                                self.remote_use_item_on(Hand::Main);
-                            } else {
-                                let _ = self.use_with_hand();
-                            }
-                            self.forced_hit = None;
-                            if let Ok(mut raven) = $crate::raven_bs::global_raven().lock() {
-                                raven.blocks_placed_session =
-                                    raven.blocks_placed_session.saturating_add(1);
+                        for cell in candidate_cells {
+                            if let Some(hit) = self.raven_find_place_hit(cell) {
+                                if self.raven_place_block_at(cell, hit) {
+                                    if let Ok(mut raven) = $crate::raven_bs::global_raven().lock() {
+                                        raven.blocks_placed_session =
+                                            raven.blocks_placed_session.saturating_add(1);
+                                    }
+                                    break;
+                                }
                             }
                         }
                     }
                 }
 
-                // 10. BlockIn: directly calls `remote_use_item_on(Hand::Main)` around player
+                // 10. BlockIn: surrounds player with blocks
                 if block_in_en {
                     let bx = p_pos[0].floor() as i32;
                     let by = p_pos[1].floor() as i32;
@@ -2601,22 +2688,16 @@ macro_rules! impl_raven_game {
                         [bx, by + 1, bz - 1],
                         [bx, by + 2, bz],
                     ];
-                    for pos in surround {
-                        if let Some(hit) = self.raven_find_place_hit(pos) {
-                            self.forced_hit = Some(hit);
-                            self.use_delay = 0;
-                            if self.remote.is_some() {
-                                self.remote_use_item_on(Hand::Main);
-                            } else {
-                                let _ = self.use_with_hand();
+                    for cell in surround {
+                        if let Some(hit) = self.raven_find_place_hit(cell) {
+                            if self.raven_place_block_at(cell, hit) {
+                                break;
                             }
-                            self.forced_hit = None;
-                            break;
                         }
                     }
                 }
 
-                // 11. BedAura: finds beds in range and breaks them via `remote_mining(true)`
+                // 11. BedAura: breaks beds within range both locally & via `S::PlayerAction`
                 if bed_aura_en {
                     let r = bed_aura_range.ceil() as i32;
                     let px = p_pos[0].floor() as i32;
@@ -2628,23 +2709,41 @@ macro_rules! impl_raven_game {
                                 let bp = [px + dx, py + dy, pz + dz];
                                 let st = self.world.block(bp[0], bp[1], bp[2]);
                                 if self.res.facts().get(st).name.ends_with("_bed") {
-                                    self.forced_hit = Some(Hit {
-                                        pos: bp,
-                                        face: [0, 1, 0],
-                                        point: [
-                                            f64::from(bp[0]) + 0.5,
-                                            f64::from(bp[1]) + 0.5,
-                                            f64::from(bp[2]) + 0.5,
-                                        ],
-                                        inside: false,
-                                    });
-                                    self.destroy_delay = 0;
                                     if self.remote.is_some() {
-                                        self.remote_mining(false);
-                                    } else {
-                                        let _ = self.break_block_as_player(bp);
+                                        let seq = if let Some(rem) = self.remote.as_mut() {
+                                            rem.sequence += 1;
+                                            rem.sequence
+                                        } else {
+                                            1
+                                        };
+                                        self.send(
+                                            horizon_protocol::packets::play::Serverbound::PlayerAction(
+                                                horizon_protocol::packets::play::PlayerAction {
+                                                    action: 0,
+                                                    pos: bp,
+                                                    direction: 1,
+                                                    sequence: seq,
+                                                },
+                                            ),
+                                        );
+                                        self.send(
+                                            horizon_protocol::packets::play::Serverbound::PlayerAction(
+                                                horizon_protocol::packets::play::PlayerAction {
+                                                    action: 3,
+                                                    pos: bp,
+                                                    direction: 1,
+                                                    sequence: seq + 1,
+                                                },
+                                            ),
+                                        );
+                                        self.send(
+                                            horizon_protocol::packets::play::Serverbound::Swing(
+                                                horizon_protocol::packets::play::Swing { hand: 0 },
+                                            ),
+                                        );
                                     }
-                                    self.forced_hit = None;
+                                    let _ = self.break_block_as_player(bp);
+                                    self.swing_arm();
                                     break 'bed_loop;
                                 }
                             }
